@@ -1,0 +1,187 @@
+# Yapo Configuration (example – copy to config.toml and fill in your values)
+#
+# This file shows the complete structure. Replace every placeholder with
+# your own server IPs, MAC address, SSH command, paths, and model names.
+
+workspace = "/home/user/apps"                # root for tool file operations
+yapo_root = "/home/user/yapo"                # runtime data (jobs, lock, cache)
+
+[database]
+path = "/home/user/yapo/memory_db"           # ChromaDB location
+collection = "conversations"
+
+compact_size_kb = 50
+
+# ---- Servers (Ollama instances) ----
+[[servers]]
+name = "nuc"
+url = "http://<nuc-ip>:11434"
+schedulable = false                         # never used for main LLM jobs
+max_jobs = 0
+description = "Intel NUC – MCP tools"
+
+[[servers]]
+name = "gpu"
+url = "http://<gpu-ip>:11434"
+schedulable = true                          # used for main LLM jobs
+max_jobs = 1
+description = "Main GPU server – code, others, vision"
+mac_address = "xx:xx:xx:xx:xx:xx"          # required for Wake‑on‑LAN
+suspend_command = "ssh -i ~/path/to/key -o BatchMode=yes user@<gpu-ip> sudo systemctl suspend"
+
+# ---- GPU Energy Management ----
+[gpu_schedule]
+timezone = "Europe/London"
+on_demand = true                            # wake GPU on demand, suspend after idle
+idle_timeout_seconds = 300                  # suspend after this many seconds of idle
+windows = [{ start = "22:00", end = "06:00" }]
+
+# ---- Model Pool ----
+[[models]]
+name = "nomic-embed-text"
+type = "embed"
+server = "nuc"
+tool_allowed = false
+temperature = 0.0
+
+[[models]]
+name = "qwen2.5:1.5b"
+type = "summarise"
+server = "nuc"
+tool_allowed = false
+temperature = 0.0
+max_tokens = 512
+repeat_penalty = 1.1
+repeat_last_n = 256
+
+[[models]]
+name = "qwen2.5:3b"
+type = "router"
+server = "nuc"
+tool_allowed = false
+temperature = 0.0
+max_tokens = 10
+
+[[models]]
+name = "<your-code-model>"                  # e.g., "qwen3coder30b:latest"
+type = "code"
+server = "gpu"
+tool_allowed = true
+temperature = 0.0
+max_tokens = 8192
+repeat_penalty = 1.1
+repeat_last_n = 256
+
+[[models]]
+name = "<your-others-model>"               # e.g., "gemma4:latest"
+type = "others"
+server = "gpu"
+tool_allowed = true
+temperature = 0.0
+max_tokens = 8192
+repeat_penalty = 1.1
+repeat_last_n = 256
+
+[[models]]
+name = "<your-vision-model>"               # e.g., "vl2"
+type = "vl"
+server = "gpu"
+tool_allowed = true
+temperature = 0.0
+max_tokens = 4096
+repeat_penalty = 1.1
+repeat_last_n = 256
+
+# ---- MCP Servers ----
+[[mcp_servers]]
+name = "yapo-mcp"
+transport = "stdio"
+command = "python3"
+args = ["/home/user/yapo/yapo_mcp.py"]     # path to yapo_mcp.py
+protocol = "simple"
+description = "Router, memory and summarisation"
+
+[[mcp_servers]]
+name = "searxng-mcp"
+transport = "stdio"
+command = "python3"
+args = ["/home/user/yapo/web_search_mcp.py"]
+protocol = "simple"
+env = { SEARXNG_URL = "http://<searxng-url>:8080" }
+description = "Web search via SearXNG (custom wrapper)"
+
+[[mcp_servers]]
+name = "shell-mcp"
+transport = "stdio"
+command = "python3"
+args = ["/home/user/yapo/shell_mcp.py"]
+env = { YAPO_WORKSPACE = "/home/user/apps" }
+protocol = "simple"
+description = "Restricted shell command execution"
+
+# ---- Tool Definitions (must match what the MCP servers expose) ----
+[[tools]]
+name = "route_prompt"
+description = "Classify a prompt as code, others, or vl"
+parameters = [{ name = "prompt", type = "string", required = true }]
+concurrent_calls = 10
+timeout_seconds = 30
+implementation = "mcp"
+mcp_server = "yapo-mcp"
+mcp_tool = "route_prompt"
+
+[[tools]]
+name = "mem_write"
+description = "Store a fact into long‑term memory"
+parameters = [{ name = "text", type = "string", required = true }]
+concurrent_calls = 10
+timeout_seconds = 30
+implementation = "mcp"
+mcp_server = "yapo-mcp"
+mcp_tool = "mem_write"
+
+[[tools]]
+name = "mem_read"
+description = "Search long‑term memory"
+parameters = [{ name = "query", type = "string", required = true }]
+concurrent_calls = 10
+timeout_seconds = 30
+implementation = "mcp"
+mcp_server = "yapo-mcp"
+mcp_tool = "mem_read"
+
+[[tools]]
+name = "summarise_text"
+description = "Summarise text into bullet points"
+parameters = [
+  { name = "text", type = "string", required = true },
+  { name = "max_points", type = "integer", required = false }
+]
+concurrent_calls = 10
+timeout_seconds = 30
+implementation = "mcp"
+mcp_server = "yapo-mcp"
+mcp_tool = "summarise_text"
+
+[[tools]]
+name = "web_search"
+description = "Search the web"
+parameters = [{ name = "query", type = "string", required = true }]
+concurrent_calls = 10
+timeout_seconds = 20
+implementation = "mcp"
+mcp_server = "searxng-mcp"
+mcp_tool = "web_search"
+
+[[tools]]
+name = "run_command"
+description = "Run a restricted shell command"
+parameters = [
+  { name = "command", type = "string", required = true },
+  { name = "timeout", type = "integer", required = false }
+]
+concurrent_calls = 10
+timeout_seconds = 30
+implementation = "mcp"
+mcp_server = "shell-mcp"
+mcp_tool = "run_command"

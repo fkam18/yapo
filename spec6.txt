@@ -1,0 +1,386 @@
+Orchestrator Design v6 – spec6.txt (final, 2026-06-25)
+============================================================
+Merged addendum, all open issues resolved. This document is the complete
+specification for Yopa.
+
+1. Overview
+-----------
+Yopa is a home‑lab orchestrator that manages stateless LLM jobs using a
+folder‑based job pool. A jobber serialises all state transitions. The main
+loop (`yapo.py`) picks jobs from the `ready` state, respects server and
+tool capacity, and forks runner processes. The runner assembles a
+standardised prompt, calls the LLM, and parses a structured JSON output.
+Context accumulates across turns; when a main job’s context becomes too
+large, the runner compacts it via MCP tool calls before the next LLM call.
+
+All tool execution (memory, summarisation, web search, shell commands, and
+routing) is delegated to external MCP servers. There are no separate
+“embed”, “summarise”, or “router” job types – these are MCP tools called
+directly.
+
+The system is designed for home use with a GPU server that is not always
+powered on. The scheduler enforces GPU power‑on windows, supports an
+on‑demand mode with idle timeout, and can trigger Wake‑on‑LAN and
+passwordless SSH suspend.
+
+All file operations performed by tools are restricted to a configured
+`workspace` root directory.
+
+2. Folder Structure & States
+------------------------------
+jobs/
+  ready/         – jobs waiting to be picked by the scheduler
+  processing/    – job currently being executed by a runner
+  pending/       – job waiting for sub‑jobs (tool children) to finish
+  done/          – job completed
+  error/         – job failed (terminal)
+
+All state changes are atomic via jobber (serialised by jobber.lock).
+
+3. Job Folder Contents
+-----------------------
+  job.toml
+    job_id          : 12‑char unique ID (same for entire task chain)
+    type            : main, tool
+    model           : model name (empty if not yet routed, or for tool jobs)
+    parent          : parent job queue number (0 if none)
+    tool_name       : for tool jobs (informational)
+    start_after     : ISO timestamp; job will not start before this (optional)
+    finish_by       : ISO timestamp; job will be terminated if still running
+                      after this (moved to error) (optional)
+    fail_on_child_error : bool (default false) – if true, parent moves to
+                          error when any child fails
+    compact         : if true, indicates this job was created by compaction
+  parent.<qno>      – empty file indicating parent queue number
+  sub.<qno>         – empty file per direct child (managed by jobber)
+  prompt.txt        – the task for this job
+  context.txt       – accumulated context (tool results, memory, etc.)
+  output.txt        – LLM response (JSON) or tool result
+  tool_call.json    – present only in tool jobs; contains the exact JSON
+                      to forward to the MCP server
+  assets/           – optional attached files
+
+4. Component Summary
+---------------------
+4.1 jobber.py
+    Serialised CRUD for jobs. Commands:
+      create  --type <type> --state <state> [--model <model>] [--parent <qno>]
+              [--prompt-file <file>] [--tool-json '<json>']
+      move    <qno> <new_state>
+      append  <qno> <file> <text>
+      clone   <qno> --new-jobid <id>
+      cleanup <qno>  (checks children, updates state)
+    When creating a tool job, --tool-json provides the exact JSON that will
+    be placed in tool_call.json.
+
+4.2 runner.py
+    Executes a job from the processing state.
+    - If type == tool:
+        Read tool_call.json, send it to the appropriate MCP server,
+        write response to output.txt.
+    - If type == main:
+        If the job has no model assigned (empty), call the `route_prompt`
+        MCP tool to classify the original user prompt. Set the job’s model
+        to the returned type (code, others, vl) and proceed.
+        Before calling the LLM:
+          * If there are no sub‑jobs and context.txt size exceeds
+            compact_size_kb, perform context compaction (see §9). This may
+            result in the job being moved to done and a clone created;
+            runner returns without calling the LLM.
+          * Otherwise, assemble the final prompt (see §5), call the LLM,
+            parse the output.
+        After LLM output:
+          - If output contains a tool call (JSON with "tool"), create a
+            tool child job via jobber, providing the extracted JSON as
+            --tool-json. Add sub.<child> file, move current job to pending.
+          - If output contains "done", the job is complete. Move to done.
+          - If the output is invalid, move to error.
+    At the end, runner calls jobber cleanup on the parent if any.
+
+4.3 yapo.py (scheduler)
+    Forever loop:
+      - Scan ready/ for jobs, ordered by queue number.
+      - For each, check:
+          * Server capacity (GPU reachable and slots available, if needed).
+            Only servers with schedulable=true are considered.
+          * Tool capacity (if job is a tool type).
+          * GPU schedule windows and job time constraints (start_after,
+            finish_by).
+      - If eligible, move job ready→processing via jobber, fork runner.
+      - Track runner PIDs; on exit, update capacity counters.
+      - When a GPU schedule window ends or on‑demand idle timeout triggers,
+        stop launching GPU jobs, wait for all active GPU jobs to finish,
+        then suspend the GPU server (if Yopa woke it or if schedule demands).
+      - If a GPU window is about to start or on‑demand requires a wake,
+        send Wake‑on‑LAN to the server's mac_address.
+
+4.4 init.py
+    Entry point: creates a main job (type=main) with an empty model in
+    ready state from a user prompt. Optionally supports --rag flags to
+    pre‑fetch context via tool jobs before the main job starts (calls
+    jobber to create tool children with appropriate --tool-json).
+
+5. Standard LLM Prompt Template (JSON output)
+----------------------------------------------
+<GOAL>
+{original_user_prompt}
+</GOAL>
+
+<CONTEXT>
+{context_text}
+</CONTEXT>
+
+<TOOLS>
+{tool_list}
+</TOOLS>
+
+<RULES>
+Your ENTIRE response must be EXACTLY ONE of the following JSON objects.
+Do NOT add any text, markdown fences, or comments.
+
+To use a tool:
+{
+  "tool": "tool_name",
+  "arguments": {
+    "param1": "value1",
+    "param2": "value2"
+  }
+}
+
+To finish the task:
+{
+  "done": true,
+  "answer": "Your final answer (any text, code, or Markdown)."
+}
+
+Never output both. The "answer" field may contain multi‑line text.
+</RULES>
+
+<TASK>
+{job_prompt}
+</TASK>
+
+6. LLM Output Parsing
+----------------------
+Valid outputs:
+  - {"tool": "...", "arguments": {...}}
+  - {"done": true, "answer": "..."}
+Any other output moves the job to error immediately (no retry).
+
+7. Tool System & MCP Integration
+---------------------------------
+All tools are backed by MCP servers. The tool registry is built by
+querying each MCP server's tools/list endpoint.
+
+7.1 MCP Servers (config.toml)
+    [[mcp_servers]]
+    name = "yapo-mcp"
+    transport = "stdio"
+    command = "python3 /usr/local/bin/yapo_mcp.py"
+    description = "Router, memory and summarisation"
+
+    [[mcp_servers]]
+    name = "searxng-mcp"
+    transport = "http"
+    url = "http://searxng-mcp:8080/mcp"
+    description = "Web search"
+
+    [[mcp_servers]]
+    name = "shell-mcp"
+    transport = "stdio"
+    command = "python3 /usr/local/bin/shell_mcp.py"
+    description = "Restricted shell commands"
+
+7.2 Tool Definitions (config.toml)
+    Tools carry a `timeout_seconds` for execution. Example definitions:
+
+    [[tools]]
+    name = "route_prompt"
+    description = "Classify a prompt as code, others, or vl"
+    parameters = [{ name = "prompt", type = "string", required = true }]
+    concurrent_calls = 10
+    timeout_seconds = 30
+    implementation = "mcp"
+    mcp_server = "yapo-mcp"
+    mcp_tool = "route_prompt"
+
+    [[tools]]
+    name = "mem_write"
+    description = "Store a fact into long‑term memory"
+    parameters = [{ name = "text", type = "string", required = true }]
+    concurrent_calls = 10
+    timeout_seconds = 30
+    implementation = "mcp"
+    mcp_server = "yapo-mcp"
+    mcp_tool = "mem_write"
+
+    [[tools]]
+    name = "mem_read"
+    description = "Search long‑term memory"
+    parameters = [{ name = "query", type = "string", required = true }]
+    concurrent_calls = 10
+    timeout_seconds = 30
+    implementation = "mcp"
+    mcp_server = "yapo-mcp"
+    mcp_tool = "mem_read"
+
+    [[tools]]
+    name = "summarise_text"
+    description = "Summarise text into bullet points"
+    parameters = [
+      { name = "text", type = "string", required = true },
+      { name = "max_points", type = "integer", required = false }
+    ]
+    concurrent_calls = 10
+    timeout_seconds = 30
+    implementation = "mcp"
+    mcp_server = "yapo-mcp"
+    mcp_tool = "summarise_text"
+
+    [[tools]]
+    name = "web_search"
+    description = "Search the web"
+    parameters = [{ name = "query", type = "string", required = true }]
+    concurrent_calls = 10
+    timeout_seconds = 20
+    implementation = "mcp"
+    mcp_server = "searxng-mcp"
+    mcp_tool = "web_search"
+
+    [[tools]]
+    name = "run_command"
+    description = "Run a restricted shell command"
+    parameters = [
+      { name = "command", type = "string", required = true },
+      { name = "timeout", type = "integer", required = false }
+    ]
+    concurrent_calls = 10
+    timeout_seconds = 30
+    implementation = "mcp"
+    mcp_server = "shell-mcp"
+    mcp_tool = "run_command"
+
+7.3 Tool Registry Caching
+    The runner uses `jobs/.tool_cache.json`. If the file does not exist,
+    or if `config.toml` has a newer modification time than the cache file,
+    the runner rebuilds the cache by calling `tools/list` on all MCP
+    servers. Otherwise, the cached registry is used as‑is. No TTL is
+    required.
+
+7.4 Tool Execution
+    - For tool jobs, runner reads tool_call.json and sends it to the MCP
+      server via tools/call. Result is stored in output.txt.
+    - During compaction (see §9) and routing, runner directly calls MCP
+      tools inline.
+
+8. RAG Pre‑fetch
+------------------
+To pre‑load context, create the main job in pending, then create tool
+children with the appropriate --tool-json values. When children complete,
+their output is appended to the main job’s context.txt, and once all
+children are done, the main job moves to ready.
+
+Example:
+  main=$(jobber create --type main --state pending --model "" \
+         --prompt-file task.txt)
+  sub1=$(jobber create --type tool --state pending --parent $main \
+         --tool-name mem_read \
+         --tool-json '{"tool":"mem_read","arguments":{"query":"project 3791"}}')
+  jobber move $sub1 ready
+
+9. Context Compaction
+----------------------
+Trigger: when runner picks up a main job with no sub‑jobs and context.txt
+size > compact_size_kb.
+
+Procedure (performed by runner before any LLM call):
+  1. Call summarise_text MCP tool with the content of context.txt.
+  2. Call mem_write MCP tool with the summary, prefixed by the job_id.
+  3. Call mem_read MCP tool with the job_id to retrieve related memories.
+  4. Create a clone of the current job (same job_id, compact=true) via
+     jobber. The clone’s context.txt is initialised with the retrieved
+     memories.
+  5. Move the original job to done, and the clone to ready.
+
+The original job never calls the LLM; the clone will be scheduled later.
+
+10. Lifecycle Example (Revised)
+-------------------------------
+a) User runs: init.py "Create a backup script".
+   jobber creates main job 1000 (type=main, model="").
+b) Scheduler runs 1000. Runner calls route_prompt MCP tool → "code".
+   Runner sets model to "code", builds prompt, calls LLM.
+   LLM returns {"tool":"read_file","arguments":{"filename":"auth.py"}}.
+   Runner creates tool job 1001 (child of 1000), moves 1000→pending.
+c) Scheduler runs 1001. Runner reads tool_call.json, forwards to shell-mcp,
+   result written to 1001/output.txt. jobber appends result to 1000’s
+   context.txt, removes sub.1001, moves 1000→ready.
+d) Scheduler runs 1000 again. LLM returns
+   {"done":true,"answer":"#!/bin/bash\n..."}. Context size < limit;
+   runner moves 1000→done.
+e) (Compaction scenario) If context size had exceeded compact_size_kb,
+   step (d) would instead compact: summarise → mem_write → mem_read →
+   clone 1002, move 1000→done, 1002→ready.
+
+11. GPU Energy Management
+--------------------------
+11.1 Configuration (config.toml)
+    Servers have optional `mac_address` and `suspend_command` for power
+    control. The GPU schedule supports an `on_demand` flag and idle timeout.
+
+    [gpu_schedule]
+    timezone = "Europe/London"
+    on_demand = true
+    idle_timeout_seconds = 60
+    windows = [{ start = "22:00", end = "06:00" }]
+
+11.2 Job Time Constraints
+    Optional job.toml fields start_after / finish_by.
+
+11.3 Scheduler Behaviour
+    - Only dispatch GPU jobs if the server is schedulable and reachable.
+    - On‑demand mode (on_demand = true):
+        * If a ready job needs the GPU and it is sleeping, send WoL to
+          mac_address, wait 10 seconds, then proceed.
+        * After all ready jobs are processed, if no new GPU jobs appear
+          for idle_timeout_seconds, suspend the GPU via suspend_command.
+        * If the GPU is already awake, it is used without power change.
+    - Scheduled mode (on_demand = false):
+        * GPU is powered on/off strictly according to the schedule windows.
+        * If within a window and GPU sleeping → wake up.
+        * At window end, wait for active jobs to finish, then suspend
+          only if Yopa woke the GPU at window start (otherwise leave on).
+    - Jobs with start_after are only considered after that time.
+    - If a job’s finish_by has passed, move to error.
+
+12. Capacity & Concurrency
+----------------------------
+- Scheduler tracks active jobs per server (only schedulable servers) and
+  per tool type.
+- Only processing jobs consume slots; pending jobs do not.
+- GPU capacity is only considered when GPU is available (powered on and
+  reachable).
+- MCP tool concurrency is managed by `concurrent_calls` in the tool
+  definitions; the scheduler enforces this for tool jobs.
+
+13. Error Handling
+-------------------
+- Invalid LLM output → job moves to error (no retry).
+- Infrastructure error (e.g., server unreachable) → job moves to error.
+- Child failure: if parent has fail_on_child_error=true, parent moves to
+  error; otherwise, child’s error is appended to parent’s context and the
+  parent continues.
+
+14. Configuration Highlights
+-----------------------------
+workspace = "/home/fkam/apps"
+compact_size_kb = 50
+[[servers]] with schedulable, mac_address, suspend_command.
+[[models]] for router, embed, summarise (NUC) and code/others/vl (GPU).
+[[mcp_servers]] defining yapo-mcp, searxng-mcp, shell-mcp.
+[[tools]] with timeout_seconds and route_prompt.
+[gpu_schedule] with on_demand, idle_timeout_seconds, windows.
+
+15. Open Issues
+----------------
+None. All design questions resolved.
