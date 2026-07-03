@@ -17,5 +17,5 @@ Yapo is a home‑lab LLM job orchestrator. It manages stateless LLM jobs through
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/your-username/yapo.git
+   git clone https://github.com/fkam18/yapo.git
    cd yapo
