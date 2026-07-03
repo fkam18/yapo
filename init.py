@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Init – create a new Yapo job.
-Usage: init.py "your prompt" [--mtype code|others|vl] [--rag <tool>:<query> ...]
+Usage: init.py "your prompt" [--mtype code|others|visual] [--rag <tool>:<query> ...]
 """
 
 import sys, subprocess, json, argparse
@@ -10,7 +10,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('prompt', nargs='?', help='The user prompt (or pipe from stdin)')
     parser.add_argument('--rag', action='append', default=[])
-    parser.add_argument('--mtype', choices=['code', 'others', 'vl'],
+    parser.add_argument('--mtype', choices=['code', 'others', 'visual'],
                         help='Force a specific model type, skip routing')
     args = parser.parse_args()
 

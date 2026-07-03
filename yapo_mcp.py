@@ -27,7 +27,7 @@ def route_prompt(args):
     import urllib.request, urllib.error
     payload = {
         "model": ROUTER_MODEL,
-        "prompt": f"Classify this task as exactly ONE word: code, others, or vl. Do not write anything else.\n\nTask: {prompt}\n\nClassification:",
+        "prompt": f"Classify this task as exactly ONE word: code, others, or visual. Do not write anything else.\n\nTask: {prompt}\n\nClassification:",
         "stream": False,
         "options": {"temperature": 0.0, "num_predict": 5}
     }
@@ -41,15 +41,15 @@ def route_prompt(args):
             # Extract the first valid keyword
             for word in response_text.split():
                 word = word.strip('.,;:!?"\'-')
-                if word in ('code', 'others', 'vl'):
+                if word in ('code', 'others', 'visual'):
                     return word
             # Fallback: check if any keyword appears anywhere
             if 'code' in response_text:
                 return 'code'
             elif 'others' in response_text:
                 return 'others'
-            elif 'vl' in response_text:
-                return 'vl'
+            elif 'visual' in response_text:
+                return 'visual'
             return response_text  # let runner handle it
     except Exception as e:
         print(f"Router error: {e}", file=sys.stderr)

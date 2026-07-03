@@ -64,13 +64,36 @@ def launch_job(qno, config):
 # ---------- GPU energy management ----------
 
 def server_reachable(server):
-    """Check if Ollama on the given server is responding."""
-    import urllib.request, urllib.error
+    """
+    Check if a backend server is responding.
+    First tries the connection module's health check (if available),
+    then falls back to a simple TCP connect.
+    """
+    import importlib, socket
+
+    backend_name = server.get("backend", "openai")
+    module_name = f"conn_{backend_name}"
+
+    # Try the connection module's health check first
     try:
-        url = f"{server['url']}/api/tags"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            return resp.status == 200
+        conn = importlib.import_module(module_name)
+        if hasattr(conn, 'server_reachable'):
+            return conn.server_reachable(server)
+    except ImportError:
+        pass
+
+    # Fallback: simple TCP connect to host:port
+    url = server['url']
+    # Extract host and port from URL like "http://192.168.0.158:11434"
+    host = url.split("://")[-1].split(":")[0]
+    try:
+        port = int(url.split(":")[-1])
+    except (ValueError, IndexError):
+        port = 80
+
+    try:
+        with socket.create_connection((host, port), timeout=5):
+            return True
     except Exception:
         return False
 

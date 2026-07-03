@@ -4,6 +4,7 @@ Runner – executes a single job.
 """
 
 import os, sys, json, subprocess, time, re
+from conn_openai import generate as call_openai
 from jobber import read_job_toml, move_job_folder, JOBS_DIR, acquire_lock, release_lock
 from config import load_config, get_tool, get_server, get_model_for_type, get_yapo_root
 
@@ -12,20 +13,11 @@ JOBS_DIR = os.path.join(YAPO_ROOT, 'jobs')
 TOOL_CACHE = os.path.join(YAPO_ROOT, '.tool_cache.json')
 
 # ---------- LLM / MCP helpers ----------
-def call_ollama(server_url, model, prompt, options):
-    import urllib.request
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "options": options
-    }
-    api_url = f"{server_url}/api/generate"
-    data = json.dumps(payload).encode('utf-8')
-    req = urllib.request.Request(api_url, data=data, headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        result = json.loads(resp.read().decode('utf-8'))
-        return result.get('response', '').strip()
+def call_backend(server, model, prompt, options):
+    """
+    Call the LLM backend. Currently only supports OpenAI‑compatible APIs.
+    """
+    return call_openai(server, model, prompt, options)
 
 def call_mcp_tool(tool, arguments):
     mcp_server_name = tool['mcp_server']
@@ -300,7 +292,7 @@ def main():
         try:
             route_result = call_mcp_tool(route_tool, {"prompt": job['prompt']})
             classification = route_result.strip().lower()
-            if classification in ['code', 'others', 'vl']:
+            if classification in ['code', 'others', 'visual']:
                 job['model'] = get_model_for_type(classification)['name']
                 with open(os.path.join(job_folder, 'job.toml'), 'w') as f:
                     json.dump(job, f)
@@ -377,7 +369,7 @@ def main():
         options['repeat_last_n'] = model_cfg['repeat_last_n']
 
     try:
-        response = call_ollama(server['url'], job['model'], prompt, options)
+        response = call_backend(server, job['model'], prompt, options)
         with open(os.path.join(job_folder, 'output.txt'), 'w') as f:
             f.write(response)
 

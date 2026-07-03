@@ -1,51 +1,74 @@
-# Yapo Configuration (example – copy to config.toml and fill in your values)
+# Yapo Configuration – Example File
+# ==================================
+# Copy this file to config.toml and fill in your own values before running Yapo.
 #
-# This file shows the complete structure. Replace every placeholder with
-# your own server IPs, MAC address, SSH command, paths, and model names.
+# All paths, IP addresses, MAC addresses, SSH commands, and model names below
+# are placeholders.  Replace them with your actual server details.
 
-workspace = "/home/user/apps"                # root for tool file operations
-yapo_root = "/home/user/yapo"                # runtime data (jobs, lock, cache)
+# Root directory for tool file operations (shell commands, file reads, etc.)
+workspace = "/home/user/apps"
+
+# Runtime data directory – jobs, lock files, caches, and the ChromaDB database
+yapo_root = "/home/user/yapo"
 
 [database]
-path = "/home/user/yapo/memory_db"           # ChromaDB location
+path = "/home/user/yapo/memory_db"
 collection = "conversations"
 
+# Maximum size (in KB) of context.txt before automatic compaction is triggered
 compact_size_kb = 50
 
-# ---- Servers (Ollama instances) ----
+# =============================================================================
+# Servers – Ollama / llama.cpp / OpenAI‑compatible instances
+# =============================================================================
+
+# NUC – dedicated to MCP tools (routing, memory, summarisation).
+# Not used for main LLM jobs.
 [[servers]]
 name = "nuc"
 url = "http://<nuc-ip>:11434"
-schedulable = false                         # never used for main LLM jobs
+backend = "openai"               # OpenAI‑compatible endpoint
+schedulable = false              # never dispatch main jobs here
 max_jobs = 0
 description = "Intel NUC – MCP tools"
 
+# GPU – main LLM server (code, others, vision tasks).
+# Supports Wake‑on‑LAN and SSH‑based suspend for energy management.
 [[servers]]
 name = "gpu"
-url = "http://<gpu-ip>:11434"
-schedulable = true                          # used for main LLM jobs
+url = "http://<gpu-ip>:8080"     # llama.cpp default port; change to 11434 for Ollama
+backend = "openai"
+schedulable = true               # main jobs run here
 max_jobs = 1
 description = "Main GPU server – code, others, vision"
 mac_address = "xx:xx:xx:xx:xx:xx"          # required for Wake‑on‑LAN
 suspend_command = "ssh -i ~/path/to/key -o BatchMode=yes user@<gpu-ip> sudo systemctl suspend"
 
-# ---- GPU Energy Management ----
-[gpu_schedule]
-timezone = "Europe/London"
-on_demand = true                            # wake GPU on demand, suspend after idle
-idle_timeout_seconds = 300                  # suspend after this many seconds of idle
-windows = [{ start = "22:00", end = "06:00" }]
+# Optional: add an api_key field for cloud providers
+# api_key = "sk-..."
 
-# ---- Model Pool ----
+# =============================================================================
+# GPU Energy Management
+# =============================================================================
+[gpu_schedule]
+timezone = "Europe/London"                 # or your local timezone
+on_demand = true                           # wake GPU on demand, suspend after idle
+idle_timeout_seconds = 300                 # seconds of idle before suspend
+windows = [{ start = "22:00", end = "06:00" }]   # overnight cheap‑rate window
+
+# =============================================================================
+# Model Pool
+# =============================================================================
+
 [[models]]
-name = "nomic-embed-text"
+name = "nomic-embed-text"                  # embedding model for memory
 type = "embed"
 server = "nuc"
 tool_allowed = false
 temperature = 0.0
 
 [[models]]
-name = "qwen2.5:1.5b"
+name = "qwen2.5:1.5b"                      # or your preferred summarisation model
 type = "summarise"
 server = "nuc"
 tool_allowed = false
@@ -55,7 +78,7 @@ repeat_penalty = 1.1
 repeat_last_n = 256
 
 [[models]]
-name = "qwen2.5:3b"
+name = "qwen2.5:3b"                        # or your preferred router model
 type = "router"
 server = "nuc"
 tool_allowed = false
@@ -63,7 +86,7 @@ temperature = 0.0
 max_tokens = 10
 
 [[models]]
-name = "<your-code-model>"                  # e.g., "qwen3coder30b:latest"
+name = "<your-code-model>"                 # e.g., "qwen3coder30b:latest"
 type = "code"
 server = "gpu"
 tool_allowed = true
@@ -73,7 +96,7 @@ repeat_penalty = 1.1
 repeat_last_n = 256
 
 [[models]]
-name = "<your-others-model>"               # e.g., "gemma4:latest"
+name = "<your-general-model>"              # e.g., "gemma4:latest"
 type = "others"
 server = "gpu"
 tool_allowed = true
@@ -83,8 +106,8 @@ repeat_penalty = 1.1
 repeat_last_n = 256
 
 [[models]]
-name = "<your-vision-model>"               # e.g., "vl2"
-type = "vl"
+name = "<your-vision-model>"               # e.g., "llava:13b"
+type = "visual"
 server = "gpu"
 tool_allowed = true
 temperature = 0.0
@@ -92,7 +115,10 @@ max_tokens = 4096
 repeat_penalty = 1.1
 repeat_last_n = 256
 
-# ---- MCP Servers ----
+# =============================================================================
+# MCP Servers – tool backends
+# =============================================================================
+
 [[mcp_servers]]
 name = "yapo-mcp"
 transport = "stdio"
@@ -119,10 +145,13 @@ env = { YAPO_WORKSPACE = "/home/user/apps" }
 protocol = "simple"
 description = "Restricted shell command execution"
 
-# ---- Tool Definitions (must match what the MCP servers expose) ----
+# =============================================================================
+# Tool Definitions – must match what the MCP servers expose
+# =============================================================================
+
 [[tools]]
 name = "route_prompt"
-description = "Classify a prompt as code, others, or vl"
+description = "Classify a prompt as code, others, or visual"
 parameters = [{ name = "prompt", type = "string", required = true }]
 concurrent_calls = 10
 timeout_seconds = 30

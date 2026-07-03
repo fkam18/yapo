@@ -1,5 +1,6 @@
 #!/bin/bash
-# test_model.sh – test a model on GPU (192.168.0.158) for Yapo JSON compliance
+# test_model.sh – test a model for Yapo JSON compliance
+# Uses OpenAI‑compatible /v1/chat/completions endpoint
 # Usage: bash test_model.sh <model_name>
 
 if [ -z "$1" ]; then
@@ -8,9 +9,10 @@ if [ -z "$1" ]; then
 fi
 
 MODEL="$1"
-OLLAMA_URL="http://192.168.0.158:11434"
+SERVER_URL="http://192.168.0.158:8080"
+API_URL="${SERVER_URL}/v1/chat/completions"
 
-echo "Testing model: $MODEL"
+echo "Testing model: $MODEL via $API_URL"
 
 # Build the same prompt the runner uses (simplified)
 PROMPT=$(cat <<'EOF'
@@ -49,21 +51,30 @@ EOF
 # Escape for JSON string
 PROMPT_ESCAPED=$(echo "$PROMPT" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
 
-# Call Ollama
-RESPONSE=$(curl -s "$OLLAMA_URL/api/generate" \
+# Call via OpenAI‑compatible endpoint
+RESPONSE=$(curl -s "$API_URL" \
+  -H "Content-Type: application/json" \
   -d "{
     \"model\": \"$MODEL\",
-    \"prompt\": $PROMPT_ESCAPED,
-    \"stream\": false,
-    \"options\": {\"temperature\": 0.0, \"num_predict\": 4096}
+    \"messages\": [{\"role\": \"user\", \"content\": $PROMPT_ESCAPED}],
+    \"temperature\": 0.0,
+    \"max_tokens\": 4096,
+    \"stream\": false
   }")
 
-# Extract the "response" field
-MODEL_OUTPUT=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('response',''))")
+# Extract the "content" field from choices[0].message
+MODEL_OUTPUT=$(echo "$RESPONSE" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+choices=d.get('choices',[])
+if choices:
+    print(choices[0].get('message',{}).get('content',''))
+")
 
 # Check if empty
 if [ -z "$MODEL_OUTPUT" ]; then
     echo "FAIL: Empty response from model"
+    echo "Raw response: $RESPONSE"
     exit 1
 fi
 
