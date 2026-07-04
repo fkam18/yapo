@@ -1,4 +1,4 @@
-** Current Release: v0.5.0 **
+** Current Release: v0.6.0 **
 
 # Yapo – Yet Another Personal Orchestrator
 

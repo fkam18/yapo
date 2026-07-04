@@ -4,7 +4,7 @@ OpenAI‑compatible backend connector.
 Works with Ollama, llama.cpp, DeepSeek, Together, Groq, etc.
 """
 
-import json, urllib.request, urllib.error
+import json, urllib.request, urllib.error, socket, sys
 
 def generate(server_config: dict, model: str, prompt: str, options: dict) -> str:
     """
@@ -70,13 +70,19 @@ def generate(server_config: dict, model: str, prompt: str, options: dict) -> str
     except Exception as e:
         raise Exception(f"Backend error: {e}")
 
-def server_reachable(server_config: dict) -> bool:
+
+def server_reachable(server_config: dict, debug: bool = False) -> bool:
     """
     Check if the OpenAI‑compatible backend is responding.
-    Uses the /v1/models endpoint, which both Ollama and llama.cpp support.
+    Uses the /v1/models endpoint first, then falls back to a TCP connect.
+    
+    Args:
+        server_config: dict with keys 'url' and optionally 'api_key'
+        debug: if True, prints diagnostic messages to stderr
+    
+    Returns:
+        True if the server is reachable, False otherwise.
     """
-    import urllib.request, urllib.error
-
     base_url = server_config['url'].rstrip('/')
     health_url = f"{base_url}/v1/models"
 
@@ -85,9 +91,30 @@ def server_reachable(server_config: dict) -> bool:
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    # Try /v1/models first
     try:
         req = urllib.request.Request(health_url, headers=headers)
         with urllib.request.urlopen(req, timeout=5) as resp:
+            if debug:
+                print(f"  /v1/models returned {resp.status}", file=sys.stderr)
             return resp.status == 200
-    except Exception:
-        return False
+    except Exception as e:
+        if debug:
+            print(f"  /v1/models failed: {e}", file=sys.stderr)
+
+    # Fallback: TCP connect
+    host = server_config['url'].split("://")[-1].split(":")[0]
+    try:
+        port = int(server_config['url'].split(":")[-1])
+    except (ValueError, IndexError):
+        port = 80
+    try:
+        with socket.create_connection((host, port), timeout=5):
+            if debug:
+                print(f"  TCP connect to {host}:{port} succeeded", file=sys.stderr)
+            return True
+    except Exception as e:
+        if debug:
+            print(f"  TCP connect failed: {e}", file=sys.stderr)
+
+    return False
