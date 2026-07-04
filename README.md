@@ -1,3 +1,5 @@
+** Current Release: v0.2.0 **
+
 # Yapo – Yet Another Personal Orchestrator
 
 Yapo is a home‑lab LLM job orchestrator. It manages stateless LLM jobs through a folder‑based job pool, routes prompts to the right model, and provides a set of tools (memory, summarisation, web search, shell commands) via MCP servers. It supports GPU energy management with on‑demand Wake‑on‑LAN and automatic suspend.
