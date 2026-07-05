@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Init – create a new Yapo job.
-Usage: init.py "your prompt" [--mtype code|others|visual] [--rag <tool>:<query> ...]
+Usage: init.py "your prompt" [--mtype code|others|visual] [--name "job name"] [--rag <tool>:<query> ...]
 """
 
 import sys, subprocess, json, argparse
@@ -12,6 +12,8 @@ def main():
     parser.add_argument('--rag', action='append', default=[])
     parser.add_argument('--mtype', choices=['code', 'others', 'visual'],
                         help='Force a specific model type, skip routing')
+    parser.add_argument('--name', '-n', type=str, default='',
+                        help='Human‑readable name for the job (displayed in dashboard)')
     args = parser.parse_args()
 
     if args.prompt:
@@ -46,7 +48,8 @@ def main():
         '--type', 'main',
         '--state', state,
         '--model', model_name,
-        '--prompt-file', '/tmp/yapo_prompt.txt'
+        '--prompt-file', '/tmp/yapo_prompt.txt',
+        '--job-name', args.name
     ]
     qno = subprocess.check_output(create_cmd).decode().strip()
     print(f"Job {qno} created.", file=sys.stderr)

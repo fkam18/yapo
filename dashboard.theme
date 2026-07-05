@@ -1,0 +1,302 @@
+:root {
+  --bg: #f8f9fa;
+  --card: #ffffff;
+  --border: #dee2e6;
+  --text: #212529;
+  --text-muted: #6c757d;
+  --primary: #0d6efd;
+  --primary-hover: #0b5ed7;
+  --success: #198754;
+  --warning: #ffc107;
+  --danger: #dc3545;
+  --info: #0dcaf0;
+  --radius: 8px;
+  --shadow: 0 1px 3px rgba(0,0,0,0.08);
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font);
+  background: #e9ecef;
+  color: var(--text);
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Left Panel (Queues) ── */
+#left {
+  width: 380px;
+  min-width: 380px;
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#left-header {
+  padding: 16px 20px;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+#left-header h2 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+#left-header .badge {
+  background: var(--primary);
+  color: #fff;
+  font-size: 0.75rem;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-weight: 500;
+}
+
+#left-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+/* ── Queue Cards ── */
+.queue {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.queue-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid transparent;
+  transition: background 0.15s;
+}
+
+.queue-header:hover { background: #f1f3f5; }
+
+.queue-header h3 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-transform: capitalize;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.queue-header .count {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--bg);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.queue-header .arrow {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  transition: transform 0.15s;
+}
+
+.queue.collapsed .queue-body { display: none; }
+.queue.collapsed .arrow { transform: rotate(-90deg); }
+
+.queue-body { padding: 6px 0; }
+
+.job-list { list-style: none; margin: 0; padding: 0; }
+
+.job-list li {
+  display: flex;
+  align-items: center;
+  padding: 5px 14px;
+  font-size: 0.85rem;
+  gap: 6px;
+  transition: background 0.1s;
+}
+
+.job-list li:hover { background: #f1f3f5; }
+
+.job-list a {
+  color: var(--primary);
+  text-decoration: none;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.job-list a:hover { text-decoration: underline; }
+
+.sub-jobs {
+  list-style: none;
+  padding-left: 22px;
+  margin: 0;
+  border-left: 2px solid #e9ecef;
+  margin-left: 18px;
+}
+
+.sub-jobs li { font-size: 0.8rem; }
+
+.sub-jobs a { color: var(--text-muted); }
+
+.toggle {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  width: 14px;
+  display: inline-block;
+  user-select: none;
+}
+
+.tool-tag {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  background: var(--bg);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 400;
+}
+
+.state-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.state-dot.ready      { background: var(--info); }
+.state-dot.processing { background: var(--warning); }
+.state-dot.pending    { background: #fd7e14; }
+.state-dot.done       { background: var(--success); }
+.state-dot.error      { background: var(--danger); }
+
+/* ── Pagination ── */
+.pagination {
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px 0;
+}
+
+.pagination button {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  color: var(--text);
+  transition: all 0.15s;
+}
+
+.pagination button:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
+.pagination button.active { background: var(--primary); color: #fff; border-color: var(--primary); font-weight: 600; }
+.pagination button:disabled { opacity: 0.4; cursor: default; }
+
+/* ── Right Panel (Details) ── */
+#right {
+  flex: 1;
+  background: var(--card);
+  overflow-y: auto;
+  padding: 24px 32px;
+}
+
+#right h2 { font-size: 1.2rem; font-weight: 600; margin-bottom: 12px; }
+
+#right .meta {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+#right .meta span { background: var(--bg); padding: 4px 10px; border-radius: 4px; }
+
+#right pre {
+  background: #f8f9fa;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+#right .empty-state {
+  text-align: center;
+  color: var(--text-muted);
+  margin-top: 80px;
+}
+
+#right .empty-state svg { width: 48px; height: 48px; margin-bottom: 12px; }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  body { flex-direction: column; }
+  #left { width: 100%; min-width: 100%; max-height: 40vh; }
+  #right { flex: none; height: 60vh; }
+}
+/* ── Divider for mobile ── */
+.divider {
+  display: none;
+  height: 2px;
+  background: var(--border);
+}
+
+@media (max-width: 768px) {
+  .divider { display: block; }
+}
+
+/* ── Raw toggle button ── */
+.raw-toggle {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  color: var(--text-muted);
+  transition: all 0.15s;
+}
+
+.raw-toggle:hover {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+/* ── Copy button ── */
+.copy-btn {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  color: var(--text-muted);
+  transition: all 0.15s;
+}
+
+.copy-btn:hover {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
