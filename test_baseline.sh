@@ -15,6 +15,10 @@ TOTAL=0
 PASSED=0
 FAILED=0
 
+# Power test wait times (seconds)
+SUSPEND_WAIT=60
+WAKE_WAIT=60
+
 # ---------- HELPERS ----------
 pass() { echo "✓ $1"; PASSED=$((PASSED+1)); TOTAL=$((TOTAL+1)); }
 fail() { echo "✗ $1"; FAILED=$((FAILED+1)); TOTAL=$((TOTAL+1)); }
@@ -117,6 +121,20 @@ else
     fail "jobber create failed"
 fi
 
+# Test job with name
+NAMED_QNO=$(python3 jobber.py create --type main --state ready --model "" --prompt-file /dev/stdin --job-name "baseline-test-job" <<< "test named job" 2>/dev/null)
+if [ -n "$NAMED_QNO" ] && [ -d "${JOBS_DIR}/ready/$NAMED_QNO" ]; then
+    # Verify the name was stored in job.toml
+    STORED_NAME=$(python3 -c "import json; f=open('${JOBS_DIR}/ready/${NAMED_QNO}/job.toml'); d=json.load(f); print(d.get('name',''))")
+    if [ "$STORED_NAME" = "baseline-test-job" ]; then
+        pass "jobber create with --job-name: name stored correctly"
+    else
+        fail "jobber create with --job-name: expected 'baseline-test-job', got '$STORED_NAME'"
+    fi
+else
+    fail "jobber create with --job-name failed"
+fi
+
 python3 jobber.py move "$QNO" processing 2>/dev/null
 if [ -d "${JOBS_DIR}/processing/$QNO" ]; then
     pass "jobber move: job $QNO → processing"
@@ -124,8 +142,9 @@ else
     fail "jobber move failed"
 fi
 
-# Move back to ready for cleanup
+# Move both back to ready for cleanup
 python3 jobber.py move "$QNO" ready 2>/dev/null
+python3 jobber.py move "$NAMED_QNO" ready 2>/dev/null
 
 # =========================================================
 # TEST 7 – Full job lifecycle (manual runner)
@@ -204,8 +223,6 @@ print(srv.get('mac_address',''))
             echo "  Suspending GPU for power test..."
             eval "$SUSPEND_CMD" 2>/dev/null || true
 
-            # Wait for GPU to fully suspend
-            SUSPEND_WAIT=60
             echo "  Waiting ${SUSPEND_WAIT} seconds for GPU to fully suspend..."
             sleep "$SUSPEND_WAIT"
 
@@ -228,8 +245,6 @@ srv = get_server('gpu')
 if srv: send_wol(srv['mac_address'])
 " 2>/dev/null
 
-                # Wait for GPU to fully boot
-                WAKE_WAIT=120
                 echo "  Waiting ${WAKE_WAIT} seconds for GPU to fully boot..."
                 sleep "$WAKE_WAIT"
 

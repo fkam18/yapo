@@ -81,6 +81,7 @@ def create_job(args):
             'type': args.type,
             'model': args.model if args.model else '',
             'parent': args.parent if args.parent else 0,
+            'name': getattr(args, 'job_name', '') or '',  
             'start_after': None,
             'finish_by': None,
             'fail_on_child_error': False,
@@ -277,6 +278,7 @@ if __name__ == '__main__':
     create_parser.add_argument('--prompt-file', default=None)
     create_parser.add_argument('--tool-json', default=None)
     create_parser.add_argument('--tool-name', default=None)
+    create_parser.add_argument('--job-name', default='', help='Human‑readable job name')
 
     move_parser = sub.add_parser('move')
     move_parser.add_argument('qno', type=int)

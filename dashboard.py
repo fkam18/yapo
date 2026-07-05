@@ -98,7 +98,6 @@ function loadJob(qno) {
                 detail.innerHTML = '<h2>Error</h2><p>' + data.error + '</p>';
             } else {
                 var displayOutput = data.output || '';
-                var isJsonOutput = false;
                 currentRawJson = displayOutput;
                 if (displayOutput) {
                     // Strip markdown fences that some models add
@@ -111,7 +110,6 @@ function loadJob(qno) {
                     try {
                         var parsed = JSON.parse(cleaned);
                         currentRawJson = JSON.stringify(parsed, null, 2);
-                        isJsonOutput = true;
                         if (parsed.answer) {
                             displayOutput = parsed.answer;
                         } else if (parsed.done) {
@@ -125,7 +123,15 @@ function loadJob(qno) {
                 }
                 currentDisplayText = displayOutput;
 
-                let html = '<h2>Job ' + qno + '</h2>';
+                let html = '';
+
+                // Job name as title
+                if (data.name) {
+                    html += '<h2>' + escapeHtml(data.name) + ' <span style="color:var(--text-muted);font-size:0.8rem;font-weight:400">(#' + qno + ')</span></h2>';
+                } else {
+                    html += '<h2>Job ' + qno + '</h2>';
+                }
+
                 html += '<div class="meta">';
                 html += '<span><b>State:</b> ' + data.state + '</span>';
                 html += '<span><b>Job type:</b> ' + data.job_type + '</span>';
@@ -286,6 +292,7 @@ def build_job_tree():
                 'job_type': job.get('type', ''),
                 'model': job.get('model', ''),
                 'tool_name': job.get('tool_name', ''),
+                'name': job.get('name', ''),
                 'parent': job.get('parent', 0),
                 'children': []
             }
@@ -361,7 +368,13 @@ def build_job_entry(qno, info, tree, depth=0):
     else:
         entry += f'<span style="width:14px;display:inline-block"></span> '
 
-    entry += f'<a onclick="loadJob(\'{qno}\')">{qno}</a>'
+    # Show "<qno> - <name>" if name exists, otherwise just "<qno>"
+    if info.get('name'):
+        label = f"{qno} - {info['name']}"
+    else:
+        label = str(qno)
+
+    entry += f'<a onclick="loadJob(\'{qno}\')" title="Job {qno}">{escape_html(label)}</a>'
     if info.get('job_type') == 'tool':
         entry += f' <span class="tool-tag">{info.get("tool_name", "tool")}</span>'
 
@@ -375,6 +388,11 @@ def build_job_entry(qno, info, tree, depth=0):
         entry += f'</ul>\n'
 
     return entry
+
+
+def escape_html(text):
+    """Escape HTML entities in a string."""
+    return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
 def get_job_details(qno):
@@ -403,6 +421,7 @@ def get_job_details(qno):
                     output = f.read()
             return {
                 'state': state,
+                'name': job.get('name', ''),
                 'job_type': job.get('type', ''),
                 'model': model_name,
                 'model_type': model_type,
