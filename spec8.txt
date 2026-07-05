@@ -162,6 +162,27 @@ All state changes are atomic via jobber (serialised by jobber.lock).
     The `--rag` flag creates tool children for pre‑fetching context before
     the main job runs.
 
+    Example:
+    python3 init.py "Create a backup script" \
+      --rag mem_read:"backup best practices" \
+      --rag web_search:"bash backup script examples"
+    
+    How it works:
+    
+        The main job is created in pending state.
+    
+        For each --rag flag, a tool child job is created with the tool name and query.
+    
+        All tool children are moved to ready.
+    
+        The main job is moved to ready.
+    
+        When the scheduler runs the tool children, their output is appended to the main job's context.txt.
+    
+        When all children are done, the main job runs with the pre‑fetched context already available.
+    
+    This allows you to seed the LLM with relevant information before it even starts processing your prompt, reducing the number of tool calls during the job.
+
 5.5 Auxiliary tools
     - `catjob.py <qno>` – prints job details and output for the given
       queue number (automatically shows output.txt regardless of state).

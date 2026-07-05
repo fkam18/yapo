@@ -6,11 +6,12 @@ Auto‑refreshes the queue list every 2 seconds.
 Shows sub‑jobs (tool children) indented under parent jobs.
 Paginates job lists with most recent jobs first.
 Theme is loaded from dashboard.theme.
+Includes a job submission form.
 """
 
-import os, json
+import os, json, subprocess, sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from config import load_config
 
 # Load Yapo configuration
@@ -44,10 +45,64 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 </head>
 <body>
 
+<!-- ── Job Submission Modal ── -->
+<div id="submit-modal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>Submit New Job</h2>
+      <span class="modal-close" onclick="closeModal()">&times;</span>
+    </div>
+    <div class="modal-body">
+      <label for="job-prompt">Prompt</label>
+      <textarea id="job-prompt" rows="4" placeholder="Enter your job prompt..."></textarea>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label for="job-mtype">Model type</label>
+          <select id="job-mtype">
+            <option value="">Auto (router)</option>
+            <option value="code">Code</option>
+            <option value="others">Others</option>
+            <option value="visual">Visual</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="job-name">Job name (optional)</label>
+          <input type="text" id="job-name" placeholder="e.g. hello-world-test" />
+        </div>
+      </div>
+
+      <div class="form-row" id="rag-section">
+        <label style="margin-bottom:6px">RAG pre‑fetch (optional)</label>
+        <div id="rag-entries">
+          <div class="rag-entry">
+            <select class="rag-tool">
+              <option value="mem_read">mem_read</option>
+              <option value="web_search">web_search</option>
+            </select>
+            <input type="text" class="rag-query" placeholder="Search query" />
+            <button class="rag-remove" onclick="removeRagEntry(this)" title="Remove">&times;</button>
+          </div>
+        </div>
+        <button class="rag-add" onclick="addRagEntry()">+ Add RAG</button>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <span id="submit-status"></span>
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitJob()">Submit Job</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Main Layout ── -->
 <div id="left">
   <div id="left-header">
     <h2>&#x26A1; Yapo Queues</h2>
-    <span class="badge" id="total-badge">0</span>
+    <div style="display:flex;align-items:center;gap:8px">
+      <span class="badge" id="total-badge">0</span>
+      <button class="new-job-btn" onclick="openModal()" title="New Job">+</button>
+    </div>
   </div>
   <div id="left-scroll">
     {QUEUES}
@@ -71,24 +126,90 @@ var pageNumbers = {};
 var currentRawJson = '';
 var currentDisplayText = '';
 
+// ── Modal ──
+function openModal() { document.getElementById('submit-modal').style.display = 'flex'; }
+function closeModal() { document.getElementById('submit-modal').style.display = 'none'; }
+
+window.onclick = function(event) {
+    if (event.target === document.getElementById('submit-modal')) closeModal();
+};
+
+// ── RAG entries ──
+function addRagEntry() {
+    var container = document.getElementById('rag-entries');
+    var entry = document.createElement('div');
+    entry.className = 'rag-entry';
+    entry.innerHTML = '<select class="rag-tool"><option value="mem_read">mem_read</option><option value="web_search">web_search</option></select><input type="text" class="rag-query" placeholder="Search query" /><button class="rag-remove" onclick="removeRagEntry(this)" title="Remove">&times;</button>';
+    container.appendChild(entry);
+}
+
+function removeRagEntry(btn) {
+    var entries = document.querySelectorAll('.rag-entry');
+    if (entries.length > 1) {
+        btn.parentElement.remove();
+    }
+}
+
+// ── Submit ──
+function submitJob() {
+    var prompt = document.getElementById('job-prompt').value.trim();
+    if (!prompt) { alert('Please enter a prompt.'); return; }
+
+    var mtype = document.getElementById('job-mtype').value;
+    var name = document.getElementById('job-name').value.trim();
+    var ragEntries = document.querySelectorAll('.rag-entry');
+    var rags = [];
+    ragEntries.forEach(function(entry) {
+        var tool = entry.querySelector('.rag-tool').value;
+        var query = entry.querySelector('.rag-query').value.trim();
+        if (query) rags.push(tool + ':' + query);
+    });
+
+    var statusEl = document.getElementById('submit-status');
+    statusEl.textContent = 'Submitting…';
+    statusEl.style.color = 'var(--text-muted)';
+
+    fetch('/api/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: prompt, mtype: mtype, name: name, rags: rags })
+    })
+    .then(function(response) { return response.json(); })
+    .then(function(data) {
+        if (data.error) {
+            statusEl.textContent = data.error;
+            statusEl.style.color = 'var(--danger)';
+        } else {
+            statusEl.textContent = 'Job ' + data.qno + ' created!';
+            statusEl.style.color = 'var(--success)';
+            setTimeout(closeModal, 1000);
+        }
+    })
+    .catch(function() {
+        statusEl.textContent = 'Network error';
+        statusEl.style.color = 'var(--danger)';
+    });
+}
+
+// ── Queue toggle ──
 function toggleQueue(header) {
   header.parentElement.classList.toggle('collapsed');
 }
 
+// ── Pagination ──
 function showPage(queueName, page) {
   pageNumbers[queueName] = page;
-
   let allItems = document.querySelectorAll('#list-' + queueName + ' .job-page');
   allItems.forEach(function(el) { el.style.display = 'none'; });
   let pageEl = document.getElementById('page-' + queueName + '-' + page);
   if (pageEl) pageEl.style.display = 'block';
-
   let btns = document.querySelectorAll('#pager-' + queueName + ' button');
   btns.forEach(function(b) { b.classList.remove('active'); });
   let activeBtn = document.getElementById('btn-' + queueName + '-' + page);
   if (activeBtn) activeBtn.classList.add('active');
 }
 
+// ── Job detail ──
 function loadJob(qno) {
     fetch('/api/job/' + qno)
         .then(response => response.json())
@@ -100,7 +221,6 @@ function loadJob(qno) {
                 var displayOutput = data.output || '';
                 currentRawJson = displayOutput;
                 if (displayOutput) {
-                    // Strip markdown fences that some models add
                     var cleaned = displayOutput.trim();
                     if (cleaned.startsWith('```')) {
                         var firstNewline = cleaned.indexOf('\n');
@@ -110,27 +230,16 @@ function loadJob(qno) {
                     try {
                         var parsed = JSON.parse(cleaned);
                         currentRawJson = JSON.stringify(parsed, null, 2);
-                        if (parsed.answer) {
-                            displayOutput = parsed.answer;
-                        } else if (parsed.done) {
-                            displayOutput = parsed.answer || '[done]';
-                        } else if (parsed.tool) {
-                            displayOutput = 'Tool call: ' + parsed.tool;
-                        }
-                    } catch(e) {
-                        // not JSON – use as‑is
-                    }
+                        if (parsed.answer) displayOutput = parsed.answer;
+                        else if (parsed.done) displayOutput = parsed.answer || '[done]';
+                        else if (parsed.tool) displayOutput = 'Tool call: ' + parsed.tool;
+                    } catch(e) {}
                 }
                 currentDisplayText = displayOutput;
 
                 let html = '';
-
-                // Job name as title
-                if (data.name) {
-                    html += '<h2>' + escapeHtml(data.name) + ' <span style="color:var(--text-muted);font-size:0.8rem;font-weight:400">(#' + qno + ')</span></h2>';
-                } else {
-                    html += '<h2>Job ' + qno + '</h2>';
-                }
+                if (data.name) html += '<h2>' + escapeHtml(data.name) + ' <span style="color:var(--text-muted);font-size:0.8rem;font-weight:400">(#' + qno + ')</span></h2>';
+                else html += '<h2>Job ' + qno + '</h2>';
 
                 html += '<div class="meta">';
                 html += '<span><b>State:</b> ' + data.state + '</span>';
@@ -164,7 +273,6 @@ function toggleRaw() {
         currentDisplayText = currentRawJson;
     } else {
         btn.textContent = 'Show raw';
-        // Re‑parse to get the answer back
         try {
             var parsed = JSON.parse(currentRawJson);
             var answer = parsed.answer || parsed.tool || currentRawJson;
@@ -182,17 +290,11 @@ function copyOutput() {
         var btn = document.querySelector('.copy-btn');
         var original = btn.textContent;
         btn.textContent = 'Copied!';
-        btn.style.background = 'var(--success)';
-        btn.style.color = '#fff';
-        btn.style.borderColor = 'var(--success)';
+        btn.style.background = 'var(--success)'; btn.style.color = '#fff'; btn.style.borderColor = 'var(--success)';
         setTimeout(function() {
             btn.textContent = original;
-            btn.style.background = '';
-            btn.style.color = '';
-            btn.style.borderColor = '';
+            btn.style.background = ''; btn.style.color = ''; btn.style.borderColor = '';
         }, 1500);
-    }).catch(function() {
-        alert('Failed to copy to clipboard');
     });
 }
 
@@ -204,13 +306,9 @@ function toggleSubs(qno) {
     let subs = document.getElementById('subs-' + qno);
     let toggle = document.getElementById('toggle-' + qno);
     if (subs.style.display === 'none') {
-        subs.style.display = 'block';
-        toggle.textContent = '\u25BC';
-        expandedJobs[qno] = true;
+        subs.style.display = 'block'; toggle.textContent = '\u25BC'; expandedJobs[qno] = true;
     } else {
-        subs.style.display = 'none';
-        toggle.textContent = '\u25B6';
-        expandedJobs[qno] = false;
+        subs.style.display = 'none'; toggle.textContent = '\u25B6'; expandedJobs[qno] = false;
     }
 }
 
@@ -219,29 +317,18 @@ function restoreToggles() {
         let subs = document.getElementById('subs-' + qno);
         let toggle = document.getElementById('toggle-' + qno);
         if (subs && toggle) {
-            if (expandedJobs[qno]) {
-                subs.style.display = 'block';
-                toggle.textContent = '\u25BC';
-            } else {
-                subs.style.display = 'none';
-                toggle.textContent = '\u25B6';
-            }
+            if (expandedJobs[qno]) { subs.style.display = 'block'; toggle.textContent = '\u25BC'; }
+            else { subs.style.display = 'none'; toggle.textContent = '\u25B6'; }
         }
     });
     document.querySelectorAll('.toggle').forEach(function(el) {
-        el.onclick = function() {
-            let qno = this.getAttribute('data-qno');
-            toggleSubs(qno);
-        };
+        el.onclick = function() { toggleSubs(this.getAttribute('data-qno')); };
     });
     document.querySelectorAll('.queue-header').forEach(function(el) {
-        el.onclick = function() {
-            toggleQueue(this);
-        };
+        el.onclick = function() { toggleQueue(this); };
     });
     Object.keys(pageNumbers).forEach(function(q) {
-        let page = pageNumbers[q] || 1;
-        showPage(q, page);
+        showPage(q, pageNumbers[q] || 1);
     });
 }
 
@@ -257,9 +344,7 @@ function refreshQueues() {
 
 function updateTotalBadge() {
     let total = 0;
-    document.querySelectorAll('.count').forEach(function(el) {
-        total += parseInt(el.textContent) || 0;
-    });
+    document.querySelectorAll('.count').forEach(function(el) { total += parseInt(el.textContent) || 0; });
     document.getElementById('total-badge').textContent = total;
 }
 
@@ -273,7 +358,6 @@ updateTotalBadge();
 def build_job_tree():
     """Build a dict of job_number → {job_data, children: [child_job_numbers]}."""
     all_jobs = {}
-
     for state in STATES:
         state_dir = os.path.join(JOBS_DIR, state)
         if not os.path.isdir(state_dir):
@@ -296,22 +380,18 @@ def build_job_tree():
                 'parent': job.get('parent', 0),
                 'children': []
             }
-
     for qno, info in all_jobs.items():
         parent = info['parent']
         if parent and parent in all_jobs:
             all_jobs[parent]['children'].append(qno)
-
     for info in all_jobs.values():
         info['children'].sort(reverse=True)
-
     return all_jobs
 
 
 def build_queue_html():
     """Create the left‑panel HTML with pagination (most recent jobs first)."""
     tree = build_job_tree()
-
     state_jobs = {s: [] for s in STATES}
     for qno, info in tree.items():
         if info['parent'] == 0:
@@ -321,14 +401,12 @@ def build_queue_html():
     for state in STATES:
         jobs = sorted(state_jobs.get(state, []), reverse=True)
         total_count = len(jobs) + sum(len(tree[q]['children']) for q in jobs if q in tree)
-
         html += f'<div class="queue">\n'
         html += f'<div class="queue-header" onclick="toggleQueue(this)">\n'
         html += f'<h3><span class="state-dot {state}"></span> {state.capitalize()} <span class="count">{total_count}</span></h3>\n'
         html += f'<span class="arrow">\u25BC</span>\n'
         html += f'</div>\n'
         html += f'<div class="queue-body">\n'
-
         if not jobs:
             html += '<p style="padding:8px 14px; color:var(--text-muted); font-size:0.85rem">Empty</p>\n'
         else:
@@ -343,50 +421,36 @@ def build_queue_html():
                     html += build_job_entry(qno, tree[qno], tree, depth=0)
                 html += '</div>\n'
             html += '</ul>\n'
-
             if pages > 1:
                 html += f'<div class="pagination" id="pager-{state}">\n'
                 for page in range(1, pages + 1):
                     active = 'active' if page == 1 else ''
                     html += f'<button id="btn-{state}-{page}" class="{active}" onclick="showPage(\'{state}\', {page})">{page}</button>\n'
                 html += '</div>\n'
-
         html += '</div>\n'
         html += '</div>\n'
-
     return html
 
 
 def build_job_entry(qno, info, tree, depth=0):
     """Build the HTML for a single job and its sub‑jobs recursively."""
-    entry = ""
-    entry += f'<li>'
-
+    entry = f'<li>'
     children = info.get('children', [])
     if children:
         entry += f'<span class="toggle" id="toggle-{qno}" data-qno="{qno}" onclick="toggleSubs({qno})">\u25B6</span> '
     else:
         entry += f'<span style="width:14px;display:inline-block"></span> '
-
-    # Show "<qno> - <name>" if name exists, otherwise just "<qno>"
-    if info.get('name'):
-        label = f"{qno} - {info['name']}"
-    else:
-        label = str(qno)
-
+    label = f"{qno} - {info['name']}" if info.get('name') else str(qno)
     entry += f'<a onclick="loadJob(\'{qno}\')" title="Job {qno}">{escape_html(label)}</a>'
     if info.get('job_type') == 'tool':
         entry += f' <span class="tool-tag">{info.get("tool_name", "tool")}</span>'
-
     entry += '</li>\n'
-
     if children:
         entry += f'<ul class="sub-jobs" id="subs-{qno}" style="display:none">\n'
         for child_qno in sorted(children, reverse=True):
             if child_qno in tree:
                 entry += build_job_entry(child_qno, tree[child_qno], tree, depth + 1)
         entry += f'</ul>\n'
-
     return entry
 
 
@@ -405,7 +469,6 @@ def get_job_details(qno):
                 return {'error': 'job.toml not found'}
             with open(toml_path) as f:
                 job = json.load(f)
-
             model_type = ''
             model_name = job.get('model', '')
             if model_name:
@@ -413,7 +476,6 @@ def get_job_details(qno):
                     if m.get('name') == model_name:
                         model_type = m.get('type', '')
                         break
-
             output = None
             output_path = os.path.join(job_dir, 'output.txt')
             if os.path.exists(output_path):
@@ -435,7 +497,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
-
         theme_css = load_theme()
 
         if path == '/':
@@ -460,6 +521,51 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             details = get_job_details(qno)
             self.wfile.write(json.dumps(details).encode())
+
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == '/api/submit':
+            content_length = int(self.headers['Content-Length'])
+            body = self.rfile.read(content_length)
+            data = json.loads(body)
+
+            prompt = data.get('prompt', '')
+            mtype = data.get('mtype', '')
+            name = data.get('name', '')
+            rags = data.get('rags', [])
+
+            # Build the init.py command
+            cmd = [sys.executable, 'init.py', prompt]
+            if mtype:
+                cmd.extend(['--mtype', mtype])
+            if name:
+                cmd.extend(['--name', name])
+            for rag in rags:
+                cmd.extend(['--rag', rag])
+
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                # Extract job number from stderr (init.py prints "Job X created." to stderr)
+                import re
+                match = re.search(r'Job (\d+) created', result.stderr)
+                if match:
+                    qno = match.group(1)
+                    response = {'success': True, 'qno': qno}
+                else:
+                    response = {'error': result.stderr.strip() or 'Unknown error'}
+            except Exception as e:
+                response = {'error': str(e)}
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode())
 
         else:
             self.send_response(404)
