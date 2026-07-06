@@ -2,7 +2,7 @@
 """
 Jobber – serialised CRUD for jobs.
 Usage:
-  jobber create --type <type> [--state <state>] [--parent <qno>] [--model <model>] [--prompt-file <file>] [--tool-json '<json>']
+  jobber create --type <type> [--state <state>] [--parent <qno>] [--model <model>] [--prompt-file <file>] [--tool-json '<json>'] [--job-name <name>] [--start-after HH:MM] [--max-job-duration <seconds>]
   jobber move <qno> <new_state>
   jobber append <qno> <file> <text>
   jobber clone <qno> --new-jobid <id>
@@ -75,15 +75,29 @@ def create_job(args):
         folder = os.path.join(JOBS_DIR, state, str(qno))
         os.makedirs(folder, exist_ok=True)
 
+        # Parse start_after (HH:MM string or None)
+        start_after = None
+        if hasattr(args, 'start_after') and args.start_after:
+            start_after = args.start_after.strip()
+
+        # Parse max_job_duration (seconds, or use global default)
+        max_job_duration = None
+        if hasattr(args, 'max_job_duration') and args.max_job_duration:
+            try:
+                max_job_duration = int(args.max_job_duration)
+            except ValueError:
+                print(f"Invalid max-job-duration: {args.max_job_duration}", file=sys.stderr)
+                sys.exit(1)
+
         # job.toml
         job_data = {
             'job_id': uuid.uuid4().hex[:12],
             'type': args.type,
             'model': args.model if args.model else '',
             'parent': args.parent if args.parent else 0,
-            'name': getattr(args, 'job_name', '') or '',  
-            'start_after': None,
-            'finish_by': None,
+            'name': getattr(args, 'job_name', '') or '',
+            'start_after': start_after,
+            'max_job_duration': max_job_duration,
             'fail_on_child_error': False,
             'compact': False
         }
@@ -279,6 +293,8 @@ if __name__ == '__main__':
     create_parser.add_argument('--tool-json', default=None)
     create_parser.add_argument('--tool-name', default=None)
     create_parser.add_argument('--job-name', default='', help='Human‑readable job name')
+    create_parser.add_argument('--start-after', default='', help='Start time in HH:MM format (e.g. 22:00)')
+    create_parser.add_argument('--max-job-duration', type=int, default=None, help='Max job duration in seconds (overrides global default)')
 
     move_parser = sub.add_parser('move')
     move_parser.add_argument('qno', type=int)

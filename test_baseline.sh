@@ -111,7 +111,7 @@ else
 fi
 
 # =========================================================
-# TEST 6 – Jobber CRUD
+# TEST 6 – Jobber CRUD (with new v9 fields)
 # =========================================================
 echo "--- Jobber CRUD ---"
 QNO=$(python3 jobber.py create --type main --state ready --model "" --prompt-file /dev/stdin <<< "test job" 2>/dev/null)
@@ -124,7 +124,6 @@ fi
 # Test job with name
 NAMED_QNO=$(python3 jobber.py create --type main --state ready --model "" --prompt-file /dev/stdin --job-name "baseline-test-job" <<< "test named job" 2>/dev/null)
 if [ -n "$NAMED_QNO" ] && [ -d "${JOBS_DIR}/ready/$NAMED_QNO" ]; then
-    # Verify the name was stored in job.toml
     STORED_NAME=$(python3 -c "import json; f=open('${JOBS_DIR}/ready/${NAMED_QNO}/job.toml'); d=json.load(f); print(d.get('name',''))")
     if [ "$STORED_NAME" = "baseline-test-job" ]; then
         pass "jobber create with --job-name: name stored correctly"
@@ -135,6 +134,20 @@ else
     fail "jobber create with --job-name failed"
 fi
 
+# Test job with start_after and max_job_duration
+TIMED_QNO=$(python3 jobber.py create --type main --state ready --model "" --prompt-file /dev/stdin --start-after "23:59" --max-job-duration 600 <<< "test timed job" 2>/dev/null)
+if [ -n "$TIMED_QNO" ] && [ -d "${JOBS_DIR}/ready/$TIMED_QNO" ]; then
+    STORED_START=$(python3 -c "import json; f=open('${JOBS_DIR}/ready/${TIMED_QNO}/job.toml'); d=json.load(f); print(d.get('start_after',''))")
+    STORED_DUR=$(python3 -c "import json; f=open('${JOBS_DIR}/ready/${TIMED_QNO}/job.toml'); d=json.load(f); print(d.get('max_job_duration',''))")
+    if [ "$STORED_START" = "23:59" ] && [ "$STORED_DUR" = "600" ]; then
+        pass "jobber create with --start-after and --max-job-duration: stored correctly"
+    else
+        fail "jobber create with time fields: expected 23:59/600, got '$STORED_START'/'$STORED_DUR'"
+    fi
+else
+    fail "jobber create with time fields failed"
+fi
+
 python3 jobber.py move "$QNO" processing 2>/dev/null
 if [ -d "${JOBS_DIR}/processing/$QNO" ]; then
     pass "jobber move: job $QNO → processing"
@@ -142,9 +155,10 @@ else
     fail "jobber move failed"
 fi
 
-# Move both back to ready for cleanup
+# Move all back to ready for cleanup
 python3 jobber.py move "$QNO" ready 2>/dev/null
 python3 jobber.py move "$NAMED_QNO" ready 2>/dev/null
+python3 jobber.py move "$TIMED_QNO" ready 2>/dev/null
 
 # =========================================================
 # TEST 7 – Full job lifecycle (manual runner)

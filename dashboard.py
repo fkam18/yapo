@@ -72,6 +72,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         </div>
       </div>
 
+      <div class="form-row">
+        <div class="form-group">
+          <label for="job-start-after">Start after (optional)</label>
+          <input type="time" id="job-start-after" />
+        </div>
+        <div class="form-group">
+          <label for="job-max-duration">Max duration (seconds, optional)</label>
+          <input type="number" id="job-max-duration" placeholder="900" min="1" />
+        </div>
+      </div>
+
       <div class="form-row" id="rag-section">
         <label style="margin-bottom:6px">RAG pre‑fetch (optional)</label>
         <div id="rag-entries">
@@ -157,6 +168,8 @@ function submitJob() {
 
     var mtype = document.getElementById('job-mtype').value;
     var name = document.getElementById('job-name').value.trim();
+    var startAfter = document.getElementById('job-start-after').value;
+    var maxDuration = document.getElementById('job-max-duration').value.trim();
     var ragEntries = document.querySelectorAll('.rag-entry');
     var rags = [];
     ragEntries.forEach(function(entry) {
@@ -172,7 +185,14 @@ function submitJob() {
     fetch('/api/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: prompt, mtype: mtype, name: name, rags: rags })
+        body: JSON.stringify({
+            prompt: prompt,
+            mtype: mtype,
+            name: name,
+            start_after: startAfter,
+            max_duration: maxDuration,
+            rags: rags
+        })
     })
     .then(function(response) { return response.json(); })
     .then(function(data) {
@@ -247,6 +267,8 @@ function loadJob(qno) {
                 if (data.model_type) html += '<span><b>Model type:</b> ' + data.model_type + '</span>';
                 if (data.model) html += '<span><b>Model:</b> ' + data.model + '</span>';
                 if (data.tool_name) html += '<span><b>Tool:</b> ' + data.tool_name + '</span>';
+                if (data.start_after) html += '<span><b>Start after:</b> ' + data.start_after + '</span>';
+                if (data.max_job_duration) html += '<span><b>Max duration:</b> ' + data.max_job_duration + 's</span>';
                 html += '</div>';
 
                 if (data.output) {
@@ -488,6 +510,8 @@ def get_job_details(qno):
                 'model': model_name,
                 'model_type': model_type,
                 'tool_name': job.get('tool_name', ''),
+                'start_after': job.get('start_after', ''),
+                'max_job_duration': job.get('max_job_duration', ''),
                 'output': output
             }
     return {'error': 'Job not found'}
@@ -538,6 +562,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             prompt = data.get('prompt', '')
             mtype = data.get('mtype', '')
             name = data.get('name', '')
+            start_after = data.get('start_after', '')
+            max_duration = data.get('max_duration', '')
             rags = data.get('rags', [])
 
             # Build the init.py command
@@ -546,6 +572,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 cmd.extend(['--mtype', mtype])
             if name:
                 cmd.extend(['--name', name])
+            if start_after:
+                cmd.extend(['--start-after', start_after])
+            if max_duration:
+                cmd.extend(['--max-duration', max_duration])
             for rag in rags:
                 cmd.extend(['--rag', rag])
 

@@ -6,7 +6,8 @@ Yapo – main scheduler loop with GPU energy management.
 import os, sys, time, subprocess, json, signal, socket, struct
 from datetime import datetime, timezone
 from jobber import list_jobs, move_job_folder, acquire_lock, release_lock
-from config import load_config, get_server, get_tool
+from config import load_config, get_server, get_tool, get_yapo_root, get_max_job_duration
+YAPO_ROOT = get_yapo_root()
 
 # ---------- capacity tracker ----------
 server_capacity = {}
@@ -26,11 +27,31 @@ def update_capacity(config):
     for tool in config.get('tools', []):
         tool_capacity[tool['name']] = 0
 
+def time_str_to_today(time_str: str):
+    """
+    Convert an HH:MM string to a datetime for today in the local timezone.
+    Used for comparing start_after against current time.
+    """
+    now = datetime.now()
+    try:
+        h, m = map(int, time_str.split(':'))
+        return now.replace(hour=h, minute=m, second=0, microsecond=0)
+    except (ValueError, AttributeError):
+        return None
+
 def can_launch(job, config):
     if job['type'] == 'main':
         model_name = job.get('model', '')
         if not model_name:
             return True   # unrouted, let runner handle
+
+        # Check start_after constraint
+        start_after = job.get('start_after', '')
+        if start_after:
+            target_time = time_str_to_today(start_after)
+            if target_time and datetime.now() < target_time:
+                return False  # too early
+
         model_cfg = None
         for m in config.get('models', []):
             if m['name'] == model_name:
@@ -74,7 +95,6 @@ def server_reachable(server):
     backend_name = server.get("backend", "openai")
     module_name = f"conn_{backend_name}"
 
-    # Try the connection module's health check first
     try:
         conn = importlib.import_module(module_name)
         if hasattr(conn, 'server_reachable'):
@@ -82,9 +102,7 @@ def server_reachable(server):
     except ImportError:
         pass
 
-    # Fallback: simple TCP connect to host:port
     url = server['url']
-    # Extract host and port from URL like "http://192.168.0.158:11434"
     host = url.split("://")[-1].split(":")[0]
     try:
         port = int(url.split(":")[-1])
@@ -99,7 +117,6 @@ def server_reachable(server):
 
 def send_wol(mac_address):
     """Send a Wake‑on‑LAN magic packet to the given MAC address."""
-    # Convert MAC to bytes
     mac_bytes = bytes.fromhex(mac_address.replace(':', '').replace('-', ''))
     if len(mac_bytes) != 6:
         raise ValueError("Invalid MAC address")
@@ -110,14 +127,15 @@ def send_wol(mac_address):
 
 def is_within_schedule(schedule):
     """Check if current time falls within any configured window."""
-    now = datetime.now(timezone.utc)
+    if not schedule:
+        return False
+    now = datetime.now()
     for window in schedule.get('windows', []):
         start = window['start']
         end = window['end']
-        # Convert HH:MM to today's datetime
         today = now.date()
-        start_dt = datetime.strptime(start, '%H:%M').replace(year=today.year, month=today.month, day=today.day, tzinfo=now.tzinfo)
-        end_dt = datetime.strptime(end, '%H:%M').replace(year=today.year, month=today.month, day=today.day, tzinfo=now.tzinfo)
+        start_dt = datetime.strptime(start, '%H:%M').replace(year=today.year, month=today.month, day=today.day)
+        end_dt = datetime.strptime(end, '%H:%M').replace(year=today.year, month=today.month, day=today.day)
         if end_dt <= start_dt:   # overnight window
             if now >= start_dt or now <= end_dt:
                 return True
@@ -136,10 +154,6 @@ def main():
         if srv.get('schedulable') and srv.get('mac_address'):
             gpu_woken_by_yapo[srv['name']] = False
             last_gpu_job_end[srv['name']] = None
-
-    gpu_schedule = config.get('gpu_schedule', {})
-    on_demand = gpu_schedule.get('on_demand', False)
-    idle_timeout = gpu_schedule.get('idle_timeout_seconds', 180)
 
     print("Yapo scheduler started.", file=sys.stderr)
 
@@ -164,26 +178,26 @@ def main():
                     if m['name'] == job['model']:
                         required_server = m['server']
                         break
-            # Tool jobs may run on NUC (no GPU), ignore energy for those
 
             if required_server:
                 srv = get_server(required_server)
                 if srv and srv.get('schedulable') and srv.get('mac_address'):
-                    # Check if GPU is reachable
+                    # Get this server's own schedule
+                    server_schedule = srv.get('gpu_schedule', {})
+                    on_demand = server_schedule.get('on_demand', False)
+
                     reachable = server_reachable(srv)
                     if not reachable:
-                        # Should we wake it?
                         should_wake = False
                         if on_demand:
                             should_wake = True
                         else:
-                            # Scheduled mode: only wake if within a window
-                            if is_within_schedule(gpu_schedule):
+                            if is_within_schedule(server_schedule):
                                 should_wake = True
                         if should_wake:
                             print(f"Waking GPU server {required_server} via WoL...", file=sys.stderr)
                             send_wol(srv['mac_address'])
-                            time.sleep(10)   # allow boot
+                            time.sleep(10)
                             reachable = server_reachable(srv)
                             if not reachable:
                                 print(f"GPU {required_server} still unreachable, skipping job", file=sys.stderr)
@@ -193,7 +207,6 @@ def main():
                             print(f"GPU {required_server} not reachable and not in schedule, skipping job", file=sys.stderr)
                             continue
                     else:
-                        # Server was already up – we did NOT wake it
                         gpu_woken_by_yapo[required_server] = False
 
             print(f"Launching job {job['qno']} (type={job['type']})", file=sys.stderr)
@@ -233,6 +246,20 @@ def main():
         for t in tool_capacity:
             tool_capacity[t] = 0
         for job in processing:
+            # ---- enforce max_job_duration ----
+            max_dur = job.get('max_job_duration') or get_max_job_duration()
+            if max_dur:
+                # We don't have a precise start time for each job in processing,
+                # but we can use the job folder's creation time as a proxy.
+                job_folder = os.path.join(YAPO_ROOT, 'jobs', 'processing', str(job['qno']))
+                if os.path.exists(job_folder):
+                    created = os.path.getctime(job_folder)
+                    elapsed = time.time() - created
+                    if elapsed > max_dur:
+                        print(f"Job {job['qno']} exceeded max duration ({max_dur}s), moving to error", file=sys.stderr)
+                        move_job_folder(job['qno'], 'processing', 'error')
+                        continue
+
             if job['type'] == 'main':
                 model_name = job.get('model', '')
                 if model_name:
@@ -246,39 +273,37 @@ def main():
                 tool_capacity[tool_name] = tool_capacity.get(tool_name, 0) + 1
 
         # ---- GPU idle / suspend logic ----
-        now = datetime.now(timezone.utc)
+        now = datetime.now()
         for srv in config.get('servers', []):
             if not srv.get('schedulable') or not srv.get('mac_address'):
                 continue
             server_name = srv['name']
-            # Only consider if we have capacity info
+            server_schedule = srv.get('gpu_schedule', {})
+            on_demand = server_schedule.get('on_demand', False)
+            idle_timeout = server_schedule.get('idle_timeout_seconds', 180)
+
             active_jobs = server_capacity.get(server_name, 0)
             if active_jobs == 0:
-                # No running GPU jobs – update last idle timestamp if not set
                 if last_gpu_job_end[server_name] is None:
                     last_gpu_job_end[server_name] = now
                 else:
                     idle_seconds = (now - last_gpu_job_end[server_name]).total_seconds()
                     if idle_seconds >= idle_timeout:
                         if gpu_woken_by_yapo.get(server_name, False):
-                            # Yapo woke this server, so we should suspend it
-                            # But only if we are allowed: in on_demand mode, always; in scheduled mode, only if outside window
                             should_suspend = False
                             if on_demand:
                                 should_suspend = True
                             else:
-                                if not is_within_schedule(gpu_schedule):
+                                if not is_within_schedule(server_schedule):
                                     should_suspend = True
                             if should_suspend:
                                 cmd = srv.get('suspend_command')
                                 if cmd:
                                     print(f"Suspending GPU {server_name} after idle timeout...", file=sys.stderr)
                                     subprocess.run(cmd, shell=True)
-                                    # Reset state
                                     gpu_woken_by_yapo[server_name] = False
                                     last_gpu_job_end[server_name] = None
             else:
-                # There are active jobs, so reset idle timer
                 last_gpu_job_end[server_name] = None
 
 if __name__ == '__main__':

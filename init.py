@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Init – create a new Yapo job.
-Usage: init.py "your prompt" [--mtype code|others|visual] [--name "job name"] [--rag <tool>:<query> ...]
+Usage: init.py "your prompt" [--mtype code|others|visual] [--name "job name"] [--start-after HH:MM] [--max-duration <seconds>] [--rag <tool>:<query> ...]
 """
 
 import sys, subprocess, json, argparse
@@ -14,6 +14,10 @@ def main():
                         help='Force a specific model type, skip routing')
     parser.add_argument('--name', '-n', type=str, default='',
                         help='Human‑readable name for the job (displayed in dashboard)')
+    parser.add_argument('--start-after', type=str, default='',
+                        help='Start time in HH:MM format (e.g. 22:00). Job will not run before this time.')
+    parser.add_argument('--max-duration', type=int, default=None,
+                        help='Max job duration in seconds. Overrides the global max_job_duration.')
     args = parser.parse_args()
 
     if args.prompt:
@@ -51,6 +55,11 @@ def main():
         '--prompt-file', '/tmp/yapo_prompt.txt',
         '--job-name', args.name
     ]
+    if args.start_after:
+        create_cmd.extend(['--start-after', args.start_after])
+    if args.max_duration is not None:
+        create_cmd.extend(['--max-job-duration', str(args.max_duration)])
+
     qno = subprocess.check_output(create_cmd).decode().strip()
     print(f"Job {qno} created.", file=sys.stderr)
 

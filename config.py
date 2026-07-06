@@ -71,6 +71,11 @@ def get_collection() -> str:
     config = load_config()
     return config.get('database', {}).get('collection', 'conversations')
 
+def get_max_job_duration() -> int:
+    """Get the global max job duration in seconds (default 900 = 15 min)."""
+    config = load_config()
+    return config.get('max_job_duration', 900)
+
 def get_model_for_type(type):
     config = load_config()
     for m in config.get('models', []):
