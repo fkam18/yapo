@@ -1,0 +1,14 @@
+venv/
+secrets/
+memory_db/
+jobs/
+__pycache__/
+*.pyc
+.git/
+.env
+*.md
+spec*.txt
+test_*.sh
+test_*.py
+mock_*.py
+ansible-venv/

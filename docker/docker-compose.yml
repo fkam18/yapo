@@ -1,0 +1,16 @@
+services:
+  yapo:
+    image: yapo:latest
+    container_name: yapo
+    restart: unless-stopped
+    ports:
+      - "3388:3388"
+    volumes:
+      - /home/master/yapo/config.toml:/app/config.toml:ro
+      - /home/master/yapo/secrets:/app/secrets:ro
+      - yapo_data:/home/yapo/yapo_root
+    environment:
+      - YAPO_CONFIG=/app/config.toml
+
+volumes:
+  yapo_data:

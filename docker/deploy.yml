@@ -1,0 +1,49 @@
+---
+- name: Deploy Yapo to app1.alt
+  hosts: yapo
+  vars:
+    nuc_ip: "192.168.0.180"
+    gpu_ip: "192.168.0.158"
+    gpu_mac: "34:97:f6:31:88:ee"
+  tasks:
+    - name: Create Yapo directories
+      file:
+        path: "/home/master/yapo/{{ item }}"
+        state: directory
+      loop:
+        - secrets/gpu
+
+    - name: Copy Docker image
+      copy:
+        src: yapo.tar.gz
+        dest: /home/master/yapo/yapo.tar.gz
+
+    - name: Load Docker image
+      shell: docker load < /home/master/yapo/yapo.tar.gz
+
+    - name: Copy secrets
+      copy:
+        src: ../secrets/
+        dest: /home/master/yapo/secrets/
+
+    - name: Copy docker-compose.yml
+      copy:
+        src: docker-compose.yml
+        dest: /home/master/yapo/docker-compose.yml
+
+    - name: Write config.toml from template
+      template:
+        src: config.toml.j2
+        dest: /home/master/yapo/config.toml
+
+    - name: Start Yapo
+      command: docker compose up -d
+      args:
+        chdir: /home/master/yapo
+
+    - name: Health check
+      uri:
+        url: http://localhost:3388/api/health
+        status_code: 200
+      retries: 10
+      delay: 5

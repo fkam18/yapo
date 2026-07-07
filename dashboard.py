@@ -484,6 +484,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
             html = build_queue_html()
             self.wfile.write(html.encode())
 
+        elif path == '/api/logs':
+            log_path = '/tmp/yapo_scheduler.log'
+            lines = request.args.get('lines', 100)
+            try:
+                with open(log_path) as f:
+                    all_lines = f.readlines()
+                    recent = all_lines[-int(lines):]
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/plain')
+                    self.end_headers()
+                    self.wfile.write(''.join(recent).encode())
+            except FileNotFoundError:
+                self.send_response(503)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'Log not available yet'}).encode())
+
+        elif path == '/api/health':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok"}).encode())
+
         elif path.startswith('/api/job/'):
             qno = path.split('/')[-1]
             self.send_response(200)
