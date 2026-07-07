@@ -99,6 +99,47 @@ def call_mcp_tool(tool, arguments):
     else:
         raise Exception(f"Unknown transport {mcp_srv['transport']}")
 
+
+def inject_attachments(job_folder, context_text):
+    """
+    Read attachments from the job's assets/ folder and inject them into
+    the context text. Text files are wrapped in <FILE> blocks. Images are
+    noted as available for the model.
+    Returns the modified context string.
+    """
+    assets_dir = os.path.join(job_folder, 'assets')
+    if not os.path.isdir(assets_dir):
+        return context_text
+
+    text_extensions = {'.py', '.sh', '.txt', '.md', '.rs', '.js', '.ts', '.c', '.cpp',
+                       '.h', '.java', '.go', '.rb', '.php', '.swift', '.kt', '.scala',
+                       '.yaml', '.yml', '.toml', '.json', '.xml', '.csv', '.log', '.conf',
+                       '.ini', '.cfg', '.env', '.css', '.html', '.sql', '.r', '.m', '.mm'}
+    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'}
+
+    injected = ""
+    for filename in sorted(os.listdir(assets_dir)):
+        filepath = os.path.join(assets_dir, filename)
+        ext = os.path.splitext(filename)[1].lower()
+        
+        if ext in text_extensions:
+            try:
+                with open(filepath, 'r', errors='replace') as f:
+                    content = f.read()
+                injected += f'\n<FILE path="{filename}">\n{content}\n</FILE>\n'
+            except Exception:
+                injected += f'\n<FILE path="{filename}">\n[Binary or unreadable file]\n</FILE>\n'
+        elif ext in image_extensions:
+            injected += f'\n<IMAGE path="{filename}">Image attached, available for analysis.</IMAGE>\n'
+        else:
+            size = os.path.getsize(filepath)
+            injected += f'\n<FILE path="{filename}">File attached ({size} bytes, type: {ext})</FILE>\n'
+
+    if injected:
+        return context_text + "\n\nAttachments:\n" + injected
+    return context_text
+
+
 def build_prompt(job, config, turn_number=0):
     """Assemble the final prompt for main jobs, with dynamic convergence rules."""
     goal = job.get('prompt', '')
@@ -107,6 +148,9 @@ def build_prompt(job, config, turn_number=0):
     if os.path.exists(ctx_path):
         with open(ctx_path) as f:
             context = f.read()
+
+    # Inject attachments into the context
+    context = inject_attachments(os.path.join(JOBS_DIR, 'processing', str(job['qno'])), context)
 
     # Look up model config by type (not name)
     model_type = job.get('model_type', '')
@@ -121,7 +165,7 @@ def build_prompt(job, config, turn_number=0):
     if model_cfg and model_cfg.get('tool_allowed', False):
         for tool in config.get('tools', []):
             if tool['name'] == 'route_prompt':
-                continue  # skip internal routing tool
+                continue
             tool_list_str += f"- {tool['name']}("
             params = tool.get('parameters', [])
             param_strs = []
@@ -195,6 +239,7 @@ Never output both formats. The "answer" field may contain multiple lines.
 """
     return template
 
+
 def propagate_tool_result(tool_qno, parent_qno, tool_name=''):
     lf = acquire_lock()
     try:
@@ -222,6 +267,7 @@ def propagate_tool_result(tool_qno, parent_qno, tool_name=''):
     finally:
         release_lock(lf)
 
+
 def extract_json(text: str):
     text = text.strip()
     text = re.sub(r'\n?```\s*$', '', text)
@@ -246,6 +292,7 @@ def extract_json(text: str):
                 except json.JSONDecodeError:
                     raise ValueError(f"Invalid JSON: {snippet[:120]}...")
     raise ValueError("Unmatched braces in response")
+
 
 def main():
     if len(sys.argv) != 2:
@@ -301,7 +348,6 @@ def main():
     # Resolve model_type → model_cfg (server name, template, options)
     model_type = job.get('model_type', '')
     if not model_type:
-        # No model type set — route the prompt
         print(f"Job {qno} routing...", file=sys.stderr)
         route_tool = get_tool('route_prompt')
         if not route_tool:
@@ -312,7 +358,6 @@ def main():
             route_result = call_mcp_tool(route_tool, {"prompt": job['prompt']})
             model_type = route_result.strip().lower()
             if model_type in ['code', 'others', 'visual']:
-                # Fallback: if routed type has multiple entries, use the first one
                 pass
             else:
                 print(f"Job {qno} failed: router returned invalid classification '{model_type}'", file=sys.stderr)
@@ -322,7 +367,6 @@ def main():
             print(f"Job {qno} failed: router error {e}", file=sys.stderr)
             move_job_folder(qno, 'processing', 'error')
             sys.exit(1)
-        # Store the routed model type in job.toml
         job['model_type'] = model_type
         with open(os.path.join(job_folder, 'job.toml'), 'w') as f:
             json.dump(job, f)

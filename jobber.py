@@ -9,7 +9,7 @@ Usage:
   jobber cleanup <qno>
 """
 
-import os, sys, shutil, json, uuid, time, argparse, fcntl
+import os, sys, shutil, json, uuid, time, argparse, fcntl, base64
 
 from config import get_yapo_root
 
@@ -31,7 +31,6 @@ def release_lock(lf):
 def read_job_toml(qno):
     """Return dict from job.toml or None."""
     toml_file = os.path.join(JOBS_DIR, 'processing', str(qno), 'job.toml')
-    # job may be in other states; search
     for state in ['ready', 'processing', 'pending', 'done', 'error']:
         path = os.path.join(JOBS_DIR, state, str(qno), 'job.toml')
         if os.path.exists(path):
@@ -67,71 +66,118 @@ def get_next_qno():
                         max_q = q
     return max_q + 1
 
-def create_job(args):
+
+def create_job(type, state='ready', model_type='', parent=0, prompt_text='',
+               job_name='', start_after=None, max_job_duration=None,
+               attachments=None, tool_name=None, tool_json=None):
+    """
+    Create a job folder. Called by both CLI and Python API.
+    
+    Args:
+        attachments: list of dicts with keys 'filename', 'content' (base64), 'mime'
+    
+    Returns:
+        int: the new queue number
+    """
+    if attachments is None:
+        attachments = []
+
     lf = acquire_lock()
     try:
         qno = get_next_qno()
-        state = args.state if args.state else 'ready'
         folder = os.path.join(JOBS_DIR, state, str(qno))
         os.makedirs(folder, exist_ok=True)
-
-        # Parse start_after (HH:MM string or None)
-        start_after = None
-        if hasattr(args, 'start_after') and args.start_after:
-            start_after = args.start_after.strip()
-
-        # Parse max_job_duration (seconds, or use global default)
-        max_job_duration = None
-        if hasattr(args, 'max_job_duration') and args.max_job_duration:
-            try:
-                max_job_duration = int(args.max_job_duration)
-            except ValueError:
-                print(f"Invalid max-job-duration: {args.max_job_duration}", file=sys.stderr)
-                sys.exit(1)
 
         # job.toml
         job_data = {
             'job_id': uuid.uuid4().hex[:12],
-            'type': args.type,
-            'model_type': getattr(args, 'model_type', '') or '',
-            'parent': args.parent if args.parent else 0,
-            'name': getattr(args, 'job_name', '') or '',
+            'type': type,
+            'model_type': model_type or '',
+            'parent': parent or 0,
+            'name': job_name or '',
             'start_after': start_after,
             'max_job_duration': max_job_duration,
             'fail_on_child_error': False,
             'compact': False
         }
-        if args.type == 'tool':
-            job_data['tool_name'] = args.tool_name if hasattr(args, 'tool_name') else ''
+        if type == 'tool':
+            job_data['tool_name'] = tool_name or ''
         with open(os.path.join(folder, 'job.toml'), 'w') as f:
             json.dump(job_data, f)
 
         # parent file
-        if args.parent:
-            with open(os.path.join(folder, f'parent.{args.parent}'), 'w') as f:
+        if parent:
+            with open(os.path.join(folder, f'parent.{parent}'), 'w') as f:
                 pass
 
         # prompt.txt
-        if args.prompt_file:
-            with open(args.prompt_file) as f:
-                prompt_text = f.read()
+        if prompt_text:
             with open(os.path.join(folder, 'prompt.txt'), 'w') as f:
                 f.write(prompt_text)
 
         # tool_call.json
-        if args.tool_json:
+        if tool_json:
             with open(os.path.join(folder, 'tool_call.json'), 'w') as f:
-                f.write(args.tool_json)
+                f.write(tool_json)
+
+        # attachments
+        if attachments:
+            assets_dir = os.path.join(folder, 'assets')
+            os.makedirs(assets_dir, exist_ok=True)
+            for att in attachments:
+                filename = att.get('filename', 'untitled')
+                content_b64 = att.get('content', '')
+                if content_b64:
+                    try:
+                        file_content = base64.b64decode(content_b64)
+                        with open(os.path.join(assets_dir, filename), 'wb') as f:
+                            f.write(file_content)
+                    except Exception as e:
+                        print(f"Warning: failed to save attachment {filename}: {e}", file=sys.stderr)
 
         print(qno)
+        return qno
     finally:
         release_lock(lf)
+
+
+def create_job_cli(args):
+    """CLI wrapper for create_job."""
+    start_after = None
+    if hasattr(args, 'start_after') and args.start_after:
+        start_after = args.start_after.strip()
+
+    max_job_duration = None
+    if hasattr(args, 'max_job_duration') and args.max_job_duration:
+        try:
+            max_job_duration = int(args.max_job_duration)
+        except ValueError:
+            print(f"Invalid max-job-duration: {args.max_job_duration}", file=sys.stderr)
+            sys.exit(1)
+
+    prompt_text = ''
+    if args.prompt_file:
+        with open(args.prompt_file) as f:
+            prompt_text = f.read()
+
+    create_job(
+        type=args.type,
+        state=args.state if args.state else 'ready',
+        model_type=getattr(args, 'model_type', '') or '',
+        parent=args.parent if args.parent else 0,
+        prompt_text=prompt_text,
+        job_name=getattr(args, 'job_name', '') or '',
+        start_after=start_after,
+        max_job_duration=max_job_duration,
+        tool_name=getattr(args, 'tool_name', None),
+        tool_json=getattr(args, 'tool_json', None),
+    )
+
 
 def move_job(args):
     lf = acquire_lock()
     try:
         qno = args.qno
-        # find current state
         current_state = None
         for state in ['ready', 'processing', 'pending', 'done', 'error']:
             if os.path.exists(os.path.join(JOBS_DIR, state, str(qno))):
@@ -144,10 +190,10 @@ def move_job(args):
     finally:
         release_lock(lf)
 
+
 def append_text(args):
     lf = acquire_lock()
     try:
-        # find job
         for state in ['ready', 'processing', 'pending']:
             folder = os.path.join(JOBS_DIR, state, str(args.qno))
             if os.path.exists(folder):
@@ -158,76 +204,64 @@ def append_text(args):
     finally:
         release_lock(lf)
 
+
 def clone_job(args):
     lf = acquire_lock()
     try:
-        # clone job data
         src_qno = args.qno
         new_id = args.new_jobid
-        # find src
         for state in ['ready', 'processing', 'pending']:
             src_folder = os.path.join(JOBS_DIR, state, str(src_qno))
             if os.path.exists(src_folder):
                 dst_folder = os.path.join(JOBS_DIR, 'ready', str(new_id))
                 shutil.copytree(src_folder, dst_folder)
-                # update job.toml with compact flag
                 toml_path = os.path.join(dst_folder, 'job.toml')
                 with open(toml_path) as f:
                     data = json.load(f)
                 data['compact'] = True
-                data['job_id'] = new_id  # optional: keep same job_id? spec says same job_id for chain; but clone gets new qno, we can keep same job_id for memory linking. We'll keep original job_id.
+                data['job_id'] = new_id
                 with open(toml_path, 'w') as f:
                     json.dump(data, f)
                 break
     finally:
         release_lock(lf)
 
+
 def cleanup_job(args):
     lf = acquire_lock()
     try:
         qno = args.qno
-        # Find job in any active state
         for state in ['pending', 'processing']:
             folder = os.path.join(JOBS_DIR, state, str(qno))
             if os.path.exists(folder):
-                # Read job type
                 with open(os.path.join(folder, 'job.toml')) as f:
                     job_data = json.load(f)
                 job_type = job_data.get('type', '')
                 output_path = os.path.join(folder, 'output.txt')
 
-                # ---------- tool job ----------
                 if job_type == 'tool' and os.path.exists(output_path):
-                    # Move tool job to done
                     move_job_folder(qno, state, 'done')
-                    # Now propagate to parent
                     done_folder = os.path.join(JOBS_DIR, 'done', str(qno))
                     parent_files = [f for f in os.listdir(done_folder) if f.startswith('parent.')]
                     if parent_files:
                         parent_qno = int(parent_files[0].split('.')[1])
-                        # Read tool output
                         with open(output_path) as f:
                             tool_output = f.read()
-                        # Find parent in any active state
                         for pst in ['ready', 'processing', 'pending']:
                             parent_path = os.path.join(JOBS_DIR, pst, str(parent_qno))
                             if os.path.exists(parent_path):
-                                # Append tool output to parent's context
                                 ctx_path = os.path.join(parent_path, 'context.txt')
                                 with open(ctx_path, 'a') as apf:
                                     apf.write(tool_output + '\n')
-                                # Remove sub file from parent
                                 sub_file = os.path.join(parent_path, f'sub.{qno}')
                                 if os.path.exists(sub_file):
                                     os.remove(sub_file)
-                                # If no more sub files, move parent to ready
                                 remaining = [f for f in os.listdir(parent_path) if f.startswith('sub.')]
                                 if not remaining:
                                     move_job_folder(parent_qno, pst, 'ready')
                                 break
                     return
 
-                # ---------- main job (non‑tool) ----------
                 sub_files = [f for f in os.listdir(folder) if f.startswith('sub.')]
                 if not sub_files:
                     if os.path.exists(output_path):
@@ -237,7 +271,6 @@ def cleanup_job(args):
                             outj = json.loads(out)
                             if 'done' in outj:
                                 move_job_folder(qno, state, 'done')
-                                # Propagate context to parent
                                 parent_files = [f for f in os.listdir(os.path.join(JOBS_DIR, 'done', str(qno))) if f.startswith('parent.')]
                                 if parent_files:
                                     parent_qno = int(parent_files[0].split('.')[1])
@@ -263,6 +296,7 @@ def cleanup_job(args):
     finally:
         release_lock(lf)
 
+
 def list_jobs(state):
     """Return list of job dicts for given state."""
     jobs = []
@@ -278,6 +312,7 @@ def list_jobs(state):
                     data['qno'] = qno
                     jobs.append(data)
     return jobs
+
 
 # CLI
 if __name__ == '__main__':
@@ -315,7 +350,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.cmd == 'create':
-        create_job(args)
+        create_job_cli(args)
     elif args.cmd == 'move':
         move_job(args)
     elif args.cmd == 'append':

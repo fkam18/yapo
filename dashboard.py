@@ -6,13 +6,14 @@ Auto‑refreshes the queue list every 2 seconds.
 Shows sub‑jobs (tool children) indented under parent jobs.
 Paginates job lists with most recent jobs first.
 Theme is loaded from dashboard.theme.
-Includes a job submission form.
+Includes a job submission form with file attachments.
 """
 
-import os, json, subprocess, sys
+import os, json, subprocess, sys, re, base64
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from config import load_config
+from jobber import create_job, JOBS_DIR
 
 # Load Yapo configuration
 config = load_config()
@@ -54,7 +55,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
     <div class="modal-body">
       <label for="job-prompt">Prompt</label>
-      <textarea id="job-prompt" rows="4" placeholder="Enter your job prompt..."></textarea>
+      <textarea id="job-prompt" rows="6" placeholder="Enter your job prompt..."></textarea>
 
       <div class="form-row">
         <div class="form-group">
@@ -81,6 +82,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           <label for="job-max-duration">Max duration (seconds, optional)</label>
           <input type="number" id="job-max-duration" placeholder="900" min="1" />
         </div>
+      </div>
+
+      <div class="form-row">
+        <label>Attachments (optional)</label>
+        <input type="file" id="job-attachments" multiple />
+        <ul id="attachment-list" style="list-style:none;padding:0;margin-top:4px"></ul>
       </div>
 
       <div class="form-row" id="rag-section">
@@ -136,6 +143,7 @@ var expandedJobs = {};
 var pageNumbers = {};
 var currentRawJson = '';
 var currentDisplayText = '';
+var attachedFiles = [];
 
 function openModal() { document.getElementById('submit-modal').style.display = 'flex'; }
 function closeModal() { document.getElementById('submit-modal').style.display = 'none'; }
@@ -143,6 +151,34 @@ window.onclick = function(event) {
     if (event.target === document.getElementById('submit-modal')) closeModal();
 };
 
+// ── Attachment handling ──
+document.getElementById('job-attachments').addEventListener('change', function(e) {
+    attachedFiles = Array.from(e.target.files);
+    var list = document.getElementById('attachment-list');
+    list.innerHTML = '';
+    attachedFiles.forEach(function(file, i) {
+        var li = document.createElement('li');
+        li.style.fontSize = '0.8rem';
+        li.style.color = 'var(--text-muted)';
+        li.innerHTML = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB) <span onclick="removeAttachment(' + i + ')" style="cursor:pointer;color:var(--danger)">&times;</span>';
+        list.appendChild(li);
+    });
+});
+
+function removeAttachment(i) {
+    attachedFiles.splice(i, 1);
+    var list = document.getElementById('attachment-list');
+    list.innerHTML = '';
+    attachedFiles.forEach(function(file, idx) {
+        var li = document.createElement('li');
+        li.style.fontSize = '0.8rem';
+        li.style.color = 'var(--text-muted)';
+        li.innerHTML = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB) <span onclick="removeAttachment(' + idx + ')" style="cursor:pointer;color:var(--danger)">&times;</span>';
+        list.appendChild(li);
+    });
+}
+
+// ── RAG entries ──
 function addRagEntry() {
     var container = document.getElementById('rag-entries');
     var entry = document.createElement('div');
@@ -155,6 +191,7 @@ function removeRagEntry(btn) {
     if (entries.length > 1) btn.parentElement.remove();
 }
 
+// ── Submit ──
 function submitJob() {
     var prompt = document.getElementById('job-prompt').value.trim();
     if (!prompt) { alert('Please enter a prompt.'); return; }
@@ -169,13 +206,41 @@ function submitJob() {
         var query = entry.querySelector('.rag-query').value.trim();
         if (query) rags.push(tool + ':' + query);
     });
+
+    // Encode attachments as base64
+    var attachments = [];
+    var filesToProcess = attachedFiles.length;
+    if (filesToProcess === 0) {
+        sendSubmit({ prompt: prompt, mtype: mtype, name: name, start_after: startAfter, max_duration: maxDuration, rags: rags, attachments: [] });
+        return;
+    }
+
+    attachedFiles.forEach(function(file) {
+        var reader = new FileReader();
+        reader.onload = function(e) {
+            var base64content = e.target.result.split(',')[1];
+            attachments.push({
+                filename: file.name,
+                content: base64content,
+                mime: file.type || 'application/octet-stream'
+            });
+            filesToProcess--;
+            if (filesToProcess === 0) {
+                sendSubmit({ prompt: prompt, mtype: mtype, name: name, start_after: startAfter, max_duration: maxDuration, rags: rags, attachments: attachments });
+            }
+        };
+        reader.readAsDataURL(file);
+    });
+}
+
+function sendSubmit(payload) {
     var statusEl = document.getElementById('submit-status');
     statusEl.textContent = 'Submitting…';
     statusEl.style.color = 'var(--text-muted)';
     fetch('/api/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: prompt, mtype: mtype, name: name, start_after: startAfter, max_duration: maxDuration, rags: rags })
+        body: JSON.stringify(payload)
     })
     .then(function(response) { return response.json(); })
     .then(function(data) {
@@ -185,6 +250,7 @@ function submitJob() {
     .catch(function() { statusEl.textContent = 'Network error'; statusEl.style.color = 'var(--danger)'; });
 }
 
+// ── Queue / job display (unchanged) ──
 function toggleQueue(header) { header.parentElement.classList.toggle('collapsed'); }
 
 function showPage(queueName, page) {
@@ -434,9 +500,7 @@ def get_job_details(qno):
             with open(toml_path) as f:
                 job = json.load(f)
 
-            # Read model_type directly from job.toml
             model_type = job.get('model_type', '')
-            # Resolve server model name from config
             model_name = ''
             if model_type:
                 for m in config.get('models', []):
@@ -486,11 +550,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         elif path == '/api/logs':
             log_path = '/tmp/yapo_scheduler.log'
-            lines = request.args.get('lines', 100)
+            query = parse_qs(parsed.query)
+            lines = int(query.get('lines', [100])[0])
             try:
                 with open(log_path) as f:
                     all_lines = f.readlines()
-                    recent = all_lines[-int(lines):]
+                    recent = all_lines[-lines:]
                     self.send_response(200)
                     self.send_header('Content-Type', 'text/plain')
                     self.end_headers()
@@ -534,28 +599,47 @@ class DashboardHandler(BaseHTTPRequestHandler):
             start_after = data.get('start_after', '')
             max_duration = data.get('max_duration', '')
             rags = data.get('rags', [])
+            attachments = data.get('attachments', [])
 
-            cmd = [sys.executable, 'init.py', prompt]
-            if mtype:
-                cmd.extend(['--mtype', mtype])
-            if name:
-                cmd.extend(['--name', name])
-            if start_after:
-                cmd.extend(['--start-after', start_after])
-            if max_duration:
-                cmd.extend(['--max-duration', max_duration])
-            for rag in rags:
-                cmd.extend(['--rag', rag])
+            # Validate attachments
+            valid_attachments = []
+            for att in attachments:
+                if att.get('filename') and att.get('content'):
+                    valid_attachments.append({
+                        'filename': att['filename'],
+                        'content': att['content'],
+                        'mime': att.get('mime', 'application/octet-stream')
+                    })
 
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                import re
-                match = re.search(r'Job (\d+) created', result.stderr)
-                if match:
-                    qno = match.group(1)
-                    response = {'success': True, 'qno': qno}
-                else:
-                    response = {'error': result.stderr.strip() or 'Unknown error'}
+                # Create the job directly via jobber's Python API
+                qno = create_job(
+                    type='main',
+                    state='pending' if rags else 'ready',
+                    model_type=mtype,
+                    prompt_text=prompt,
+                    job_name=name,
+                    start_after=start_after or None,
+                    max_job_duration=int(max_duration) if max_duration else None,
+                    attachments=valid_attachments
+                )
+
+                # Create RAG tool children if requested
+                if rags:
+                    for rag_spec in rags:
+                        tool_name, query = rag_spec.split(':', 1)
+                        tool_json_str = json.dumps({"tool": tool_name, "arguments": {"query": query}})
+                        sub_qno = create_job(
+                            type='tool',
+                            state='pending',
+                            parent=qno,
+                            tool_name=tool_name,
+                            tool_json=tool_json_str
+                        )
+                        move_job_folder(sub_qno, 'pending', 'ready')
+                    move_job_folder(qno, 'pending', 'ready')
+
+                response = {'success': True, 'qno': str(qno)}
             except Exception as e:
                 response = {'error': str(e)}
 
