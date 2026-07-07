@@ -2,7 +2,7 @@
 """
 Jobber – serialised CRUD for jobs.
 Usage:
-  jobber create --type <type> [--state <state>] [--parent <qno>] [--model <model>] [--prompt-file <file>] [--tool-json '<json>'] [--job-name <name>] [--start-after HH:MM] [--max-job-duration <seconds>]
+  jobber create --type <type> [--state <state>] [--parent <qno>] [--model-type <model type>] [--prompt-file <file>] [--tool-json '<json>'] [--job-name <name>] [--start-after HH:MM] [--max-job-duration <seconds>]
   jobber move <qno> <new_state>
   jobber append <qno> <file> <text>
   jobber clone <qno> --new-jobid <id>
@@ -93,7 +93,7 @@ def create_job(args):
         job_data = {
             'job_id': uuid.uuid4().hex[:12],
             'type': args.type,
-            'model': args.model if args.model else '',
+            'model_type': getattr(args, 'model_type', '') or '',
             'parent': args.parent if args.parent else 0,
             'name': getattr(args, 'job_name', '') or '',
             'start_after': start_after,
@@ -288,7 +288,7 @@ if __name__ == '__main__':
     create_parser.add_argument('--type', required=True)
     create_parser.add_argument('--state', default='ready')
     create_parser.add_argument('--parent', type=int, default=0)
-    create_parser.add_argument('--model', default='')
+    create_parser.add_argument('--model-type', default='')
     create_parser.add_argument('--prompt-file', default=None)
     create_parser.add_argument('--tool-json', default=None)
     create_parser.add_argument('--tool-name', default=None)

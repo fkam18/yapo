@@ -14,9 +14,6 @@ TOOL_CACHE = os.path.join(YAPO_ROOT, '.tool_cache.json')
 
 # ---------- LLM / MCP helpers ----------
 def call_backend(server, model, prompt, options):
-    """
-    Call the LLM backend. Currently only supports OpenAI‑compatible APIs.
-    """
     return call_openai(server, model, prompt, options)
 
 def call_mcp_tool(tool, arguments):
@@ -110,15 +107,21 @@ def build_prompt(job, config, turn_number=0):
     if os.path.exists(ctx_path):
         with open(ctx_path) as f:
             context = f.read()
-    model_name = job.get('model', '')
+
+    # Look up model config by type (not name)
+    model_type = job.get('model_type', '')
     model_cfg = None
     for m in config.get('models', []):
-        if m['name'] == model_name:
+        if m.get('type') == model_type:
             model_cfg = m
             break
+
+    # Build tool list string
     tool_list_str = ''
     if model_cfg and model_cfg.get('tool_allowed', False):
         for tool in config.get('tools', []):
+            if tool['name'] == 'route_prompt':
+                continue  # skip internal routing tool
             tool_list_str += f"- {tool['name']}("
             params = tool.get('parameters', [])
             param_strs = []
@@ -135,9 +138,21 @@ def build_prompt(job, config, turn_number=0):
         convergence_note = "If the task is a straightforward coding or writing request that you can complete with your own knowledge, do it immediately without calling any tool."
     elif turn_number == 3:
         convergence_note = "You have called tools several times. You MUST now provide the final answer using the information you have. Do NOT call any more tools."
-    else:  # turn_number >= 4 (though loop guard catches ≥5)
+    else:
         convergence_note = "This is your LAST chance. Produce the final answer NOW. Do NOT call any tools."
 
+    # Check if the model has a custom prompt template
+    custom_template = model_cfg.get('prompt_template', '') if model_cfg else ''
+
+    if custom_template:
+        prompt = custom_template.replace('{{goal}}', goal)
+        prompt = prompt.replace('{{context}}', context or '(none)')
+        prompt = prompt.replace('{{tool_list}}', tool_list_str)
+        prompt = prompt.replace('{{task}}', job.get('prompt', ''))
+        prompt = prompt.replace('{{convergence_note}}', convergence_note)
+        return prompt
+
+    # Fallback: default XML template
     template = f"""<GOAL>
 {goal}
 </GOAL>
@@ -282,7 +297,11 @@ def main():
 
     # ----- main job -----
     print(f"Job {qno} (main) started: {job['prompt'][:60]}", file=sys.stderr)
-    if not job.get('model'):
+
+    # Resolve model_type → model_cfg (server name, template, options)
+    model_type = job.get('model_type', '')
+    if not model_type:
+        # No model type set — route the prompt
         print(f"Job {qno} routing...", file=sys.stderr)
         route_tool = get_tool('route_prompt')
         if not route_tool:
@@ -291,20 +310,42 @@ def main():
             sys.exit(1)
         try:
             route_result = call_mcp_tool(route_tool, {"prompt": job['prompt']})
-            classification = route_result.strip().lower()
-            if classification in ['code', 'others', 'visual']:
-                job['model'] = get_model_for_type(classification)['name']
-                with open(os.path.join(job_folder, 'job.toml'), 'w') as f:
-                    json.dump(job, f)
-                print(f"Job {qno} routed to model {job['model']} (type={classification})", file=sys.stderr)
+            model_type = route_result.strip().lower()
+            if model_type in ['code', 'others', 'visual']:
+                # Fallback: if routed type has multiple entries, use the first one
+                pass
             else:
-                print(f"Job {qno} failed: router returned invalid classification '{route_result}'", file=sys.stderr)
+                print(f"Job {qno} failed: router returned invalid classification '{model_type}'", file=sys.stderr)
                 move_job_folder(qno, 'processing', 'error')
                 sys.exit(1)
         except Exception as e:
             print(f"Job {qno} failed: router error {e}", file=sys.stderr)
             move_job_folder(qno, 'processing', 'error')
             sys.exit(1)
+        # Store the routed model type in job.toml
+        job['model_type'] = model_type
+        with open(os.path.join(job_folder, 'job.toml'), 'w') as f:
+            json.dump(job, f)
+        print(f"Job {qno} routed to type={model_type}", file=sys.stderr)
+
+    # Look up model config by type
+    model_cfg = None
+    for m in config.get('models', []):
+        if m.get('type') == model_type:
+            model_cfg = m
+            break
+    if not model_cfg:
+        print(f"Job {qno} failed: model type '{model_type}' not found in config", file=sys.stderr)
+        move_job_folder(qno, 'processing', 'error')
+        sys.exit(1)
+
+    server_model_name = model_cfg['name']
+    server_name = model_cfg['server']
+    server = get_server(server_name)
+    if not server:
+        print(f"Job {qno} failed: server {server_name} not found", file=sys.stderr)
+        move_job_folder(qno, 'processing', 'error')
+        sys.exit(1)
 
     # compaction check (only when no sub jobs)
     sub_files = [f for f in os.listdir(job_folder) if f.startswith('sub.')]
@@ -322,7 +363,7 @@ def main():
                 job_id = job.get('job_id', '')
                 call_mcp_tool(mem_write_tool, {"text": f"{job_id}: {summary}"})
                 memory = call_mcp_tool(mem_read_tool, {"query": job_id})
-                new_qno = subprocess.check_output([sys.executable, 'jobber.py', 'create', '--type', 'main', '--state', 'ready', '--model', job['model'], '--parent', str(job.get('parent', 0)), '--prompt-file', prompt_path])
+                new_qno = subprocess.check_output([sys.executable, 'jobber.py', 'create', '--type', 'main', '--state', 'ready', '--model-type', model_type, '--parent', str(job.get('parent', 0)), '--prompt-file', prompt_path])
                 new_qno = int(new_qno.strip())
                 clone_folder = os.path.join(JOBS_DIR, 'ready', str(new_qno))
                 with open(os.path.join(clone_folder, 'context.txt'), 'w') as f:
@@ -331,31 +372,14 @@ def main():
                 print(f"Job {qno} compacted to job {new_qno}", file=sys.stderr)
                 sys.exit(0)
 
-    # Determine current turn number (number of tool calls already made)
+    # Determine current turn number
     turn_number = 0
     ctx_path = os.path.join(job_folder, 'context.txt')
     if os.path.exists(ctx_path):
         with open(ctx_path) as f:
             turn_number = len([line for line in f if line.startswith('[TOOL:')])
 
-    # normal LLM call
-    model_cfg = None
-    for m in config.get('models', []):
-        if m['name'] == job['model']:
-            model_cfg = m
-            break
-    if not model_cfg:
-        print(f"Job {qno} failed: model {job['model']} not found", file=sys.stderr)
-        move_job_folder(qno, 'processing', 'error')
-        sys.exit(1)
-    server_name = model_cfg['server']
-    server = get_server(server_name)
-    if not server:
-        print(f"Job {qno} failed: server {server_name} not found", file=sys.stderr)
-        move_job_folder(qno, 'processing', 'error')
-        sys.exit(1)
-
-    print(f"Job {qno} calling LLM {job['model']} on {server_name}...", file=sys.stderr)
+    print(f"Job {qno} calling LLM {server_model_name} on {server_name}...", file=sys.stderr)
     prompt = build_prompt(job, config, turn_number)
     with open(os.path.join(job_folder, 'full_prompt.txt'), 'w') as f:
         f.write(prompt)
@@ -367,9 +391,11 @@ def main():
         options['repeat_penalty'] = model_cfg['repeat_penalty']
     if 'repeat_last_n' in model_cfg:
         options['repeat_last_n'] = model_cfg['repeat_last_n']
+    if 'stop' in model_cfg:
+        options['stop'] = model_cfg['stop']
 
     try:
-        response = call_backend(server, job['model'], prompt, options)
+        response = call_backend(server, server_model_name, prompt, options)
         with open(os.path.join(job_folder, 'output.txt'), 'w') as f:
             f.write(response)
 
@@ -387,7 +413,6 @@ def main():
             tool_name = output_json['tool']
             arguments = output_json['arguments']
 
-            # ---- Total tool‑call cap: force done after 5 calls ----
             tool_call_history = []
             ctx_path = os.path.join(job_folder, 'context.txt')
             if os.path.exists(ctx_path):

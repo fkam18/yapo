@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 """
 Init – create a new Yapo job.
-Usage: init.py "your prompt" [--mtype code|others|visual] [--name "job name"] [--start-after HH:MM] [--max-duration <seconds>] [--rag <tool>:<query> ...]
+Usage: init.py "your prompt" [--mtype <model_type>] [--name "job name"] [--start-after HH:MM] [--max-duration <seconds>] [--rag <tool>:<query> ...]
 """
 
 import sys, subprocess, json, argparse
+from config import load_config
 
 def main():
+    # Load config to get available model types
+    config = load_config()
+    model_types = sorted(set(
+        m['type'] for m in config.get('models', [])
+        if m.get('server') != 'nuc' and m.get('type') not in ('embed', 'summarise', 'router')
+    ))
+
     parser = argparse.ArgumentParser()
     parser.add_argument('prompt', nargs='?', help='The user prompt (or pipe from stdin)')
     parser.add_argument('--rag', action='append', default=[])
-    parser.add_argument('--mtype', choices=['code', 'others', 'visual'],
-                        help='Force a specific model type, skip routing')
+    parser.add_argument('--mtype', choices=model_types,
+                        help=f'Force a specific model type, skip routing. Available: {", ".join(model_types)}')
     parser.add_argument('--name', '-n', type=str, default='',
                         help='Human‑readable name for the job (displayed in dashboard)')
     parser.add_argument('--start-after', type=str, default='',
@@ -32,18 +40,9 @@ def main():
     with open('/tmp/yapo_prompt.txt', 'w') as f:
         f.write(prompt_text)
 
-    # If model type is given, look up the model name from config and pass it to jobber
-    model_name = ''
-    if args.mtype:
-        from config import load_config
-        config = load_config()
-        for m in config.get('models', []):
-            if m.get('type') == args.mtype and m.get('server') != 'nuc':
-                model_name = m['name']
-                break
-        if not model_name:
-            print(f"Error: no model found for type '{args.mtype}'", file=sys.stderr)
-            sys.exit(1)
+    # If model type is given, pass it directly to jobber
+    # The runner will resolve model_type → server model name later
+    model_type = args.mtype if args.mtype else ''
 
     # Create main job (pending if RAG, otherwise ready)
     state = 'pending' if args.rag else 'ready'
@@ -51,7 +50,7 @@ def main():
         'python3', 'jobber.py', 'create',
         '--type', 'main',
         '--state', state,
-        '--model', model_name,
+        '--model-type', model_type,
         '--prompt-file', '/tmp/yapo_prompt.txt',
         '--job-name', args.name
     ]

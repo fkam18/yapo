@@ -137,15 +137,12 @@ var pageNumbers = {};
 var currentRawJson = '';
 var currentDisplayText = '';
 
-// ── Modal ──
 function openModal() { document.getElementById('submit-modal').style.display = 'flex'; }
 function closeModal() { document.getElementById('submit-modal').style.display = 'none'; }
-
 window.onclick = function(event) {
     if (event.target === document.getElementById('submit-modal')) closeModal();
 };
 
-// ── RAG entries ──
 function addRagEntry() {
     var container = document.getElementById('rag-entries');
     var entry = document.createElement('div');
@@ -153,19 +150,14 @@ function addRagEntry() {
     entry.innerHTML = '<select class="rag-tool"><option value="mem_read">mem_read</option><option value="web_search">web_search</option></select><input type="text" class="rag-query" placeholder="Search query" /><button class="rag-remove" onclick="removeRagEntry(this)" title="Remove">&times;</button>';
     container.appendChild(entry);
 }
-
 function removeRagEntry(btn) {
     var entries = document.querySelectorAll('.rag-entry');
-    if (entries.length > 1) {
-        btn.parentElement.remove();
-    }
+    if (entries.length > 1) btn.parentElement.remove();
 }
 
-// ── Submit ──
 function submitJob() {
     var prompt = document.getElementById('job-prompt').value.trim();
     if (!prompt) { alert('Please enter a prompt.'); return; }
-
     var mtype = document.getElementById('job-mtype').value;
     var name = document.getElementById('job-name').value.trim();
     var startAfter = document.getElementById('job-start-after').value;
@@ -177,46 +169,24 @@ function submitJob() {
         var query = entry.querySelector('.rag-query').value.trim();
         if (query) rags.push(tool + ':' + query);
     });
-
     var statusEl = document.getElementById('submit-status');
     statusEl.textContent = 'Submitting…';
     statusEl.style.color = 'var(--text-muted)';
-
     fetch('/api/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            prompt: prompt,
-            mtype: mtype,
-            name: name,
-            start_after: startAfter,
-            max_duration: maxDuration,
-            rags: rags
-        })
+        body: JSON.stringify({ prompt: prompt, mtype: mtype, name: name, start_after: startAfter, max_duration: maxDuration, rags: rags })
     })
     .then(function(response) { return response.json(); })
     .then(function(data) {
-        if (data.error) {
-            statusEl.textContent = data.error;
-            statusEl.style.color = 'var(--danger)';
-        } else {
-            statusEl.textContent = 'Job ' + data.qno + ' created!';
-            statusEl.style.color = 'var(--success)';
-            setTimeout(closeModal, 1000);
-        }
+        if (data.error) { statusEl.textContent = data.error; statusEl.style.color = 'var(--danger)'; }
+        else { statusEl.textContent = 'Job ' + data.qno + ' created!'; statusEl.style.color = 'var(--success)'; setTimeout(closeModal, 1000); }
     })
-    .catch(function() {
-        statusEl.textContent = 'Network error';
-        statusEl.style.color = 'var(--danger)';
-    });
+    .catch(function() { statusEl.textContent = 'Network error'; statusEl.style.color = 'var(--danger)'; });
 }
 
-// ── Queue toggle ──
-function toggleQueue(header) {
-  header.parentElement.classList.toggle('collapsed');
-}
+function toggleQueue(header) { header.parentElement.classList.toggle('collapsed'); }
 
-// ── Pagination ──
 function showPage(queueName, page) {
   pageNumbers[queueName] = page;
   let allItems = document.querySelectorAll('#list-' + queueName + ' .job-page');
@@ -229,7 +199,6 @@ function showPage(queueName, page) {
   if (activeBtn) activeBtn.classList.add('active');
 }
 
-// ── Job detail ──
 function loadJob(qno) {
     fetch('/api/job/' + qno)
         .then(response => response.json())
@@ -265,7 +234,7 @@ function loadJob(qno) {
                 html += '<span><b>State:</b> ' + data.state + '</span>';
                 html += '<span><b>Job type:</b> ' + data.job_type + '</span>';
                 if (data.model_type) html += '<span><b>Model type:</b> ' + data.model_type + '</span>';
-                if (data.model) html += '<span><b>Model:</b> ' + data.model + '</span>';
+                if (data.model_name) html += '<span><b>Model:</b> ' + data.model_name + '</span>';
                 if (data.tool_name) html += '<span><b>Tool:</b> ' + data.tool_name + '</span>';
                 if (data.start_after) html += '<span><b>Start after:</b> ' + data.start_after + '</span>';
                 if (data.max_job_duration) html += '<span><b>Max duration:</b> ' + data.max_job_duration + 's</span>';
@@ -290,20 +259,11 @@ function toggleRaw() {
     let btn = document.getElementById('raw-btn');
     let block = document.getElementById('output-block');
     if (btn.textContent === 'Show raw') {
-        btn.textContent = 'Show answer';
-        block.textContent = currentRawJson;
-        currentDisplayText = currentRawJson;
+        btn.textContent = 'Show answer'; block.textContent = currentRawJson; currentDisplayText = currentRawJson;
     } else {
         btn.textContent = 'Show raw';
-        try {
-            var parsed = JSON.parse(currentRawJson);
-            var answer = parsed.answer || parsed.tool || currentRawJson;
-            block.textContent = answer;
-            currentDisplayText = answer;
-        } catch(e) {
-            block.textContent = currentRawJson;
-            currentDisplayText = currentRawJson;
-        }
+        try { var parsed = JSON.parse(currentRawJson); var answer = parsed.answer || parsed.tool || currentRawJson; block.textContent = answer; currentDisplayText = answer; }
+        catch(e) { block.textContent = currentRawJson; currentDisplayText = currentRawJson; }
     }
 }
 
@@ -311,27 +271,18 @@ function copyOutput() {
     navigator.clipboard.writeText(currentDisplayText).then(function() {
         var btn = document.querySelector('.copy-btn');
         var original = btn.textContent;
-        btn.textContent = 'Copied!';
-        btn.style.background = 'var(--success)'; btn.style.color = '#fff'; btn.style.borderColor = 'var(--success)';
-        setTimeout(function() {
-            btn.textContent = original;
-            btn.style.background = ''; btn.style.color = ''; btn.style.borderColor = '';
-        }, 1500);
+        btn.textContent = 'Copied!'; btn.style.background = 'var(--success)'; btn.style.color = '#fff'; btn.style.borderColor = 'var(--success)';
+        setTimeout(function() { btn.textContent = original; btn.style.background = ''; btn.style.color = ''; btn.style.borderColor = ''; }, 1500);
     });
 }
 
-function escapeHtml(text) {
-    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
+function escapeHtml(text) { return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
 function toggleSubs(qno) {
     let subs = document.getElementById('subs-' + qno);
     let toggle = document.getElementById('toggle-' + qno);
-    if (subs.style.display === 'none') {
-        subs.style.display = 'block'; toggle.textContent = '\u25BC'; expandedJobs[qno] = true;
-    } else {
-        subs.style.display = 'none'; toggle.textContent = '\u25B6'; expandedJobs[qno] = false;
-    }
+    if (subs.style.display === 'none') { subs.style.display = 'block'; toggle.textContent = '\u25BC'; expandedJobs[qno] = true; }
+    else { subs.style.display = 'none'; toggle.textContent = '\u25B6'; expandedJobs[qno] = false; }
 }
 
 function restoreToggles() {
@@ -343,25 +294,16 @@ function restoreToggles() {
             else { subs.style.display = 'none'; toggle.textContent = '\u25B6'; }
         }
     });
-    document.querySelectorAll('.toggle').forEach(function(el) {
-        el.onclick = function() { toggleSubs(this.getAttribute('data-qno')); };
-    });
-    document.querySelectorAll('.queue-header').forEach(function(el) {
-        el.onclick = function() { toggleQueue(this); };
-    });
-    Object.keys(pageNumbers).forEach(function(q) {
-        showPage(q, pageNumbers[q] || 1);
-    });
+    document.querySelectorAll('.toggle').forEach(function(el) { el.onclick = function() { toggleSubs(this.getAttribute('data-qno')); }; });
+    document.querySelectorAll('.queue-header').forEach(function(el) { el.onclick = function() { toggleQueue(this); }; });
+    Object.keys(pageNumbers).forEach(function(q) { showPage(q, pageNumbers[q] || 1); });
 }
 
 function refreshQueues() {
-    fetch('/api/queues')
-        .then(response => response.text())
-        .then(html => {
-            document.getElementById('left-scroll').innerHTML = html;
-            restoreToggles();
-            updateTotalBadge();
-        });
+    fetch('/api/queues').then(response => response.text()).then(html => {
+        document.getElementById('left-scroll').innerHTML = html;
+        restoreToggles(); updateTotalBadge();
+    });
 }
 
 function updateTotalBadge() {
@@ -396,7 +338,7 @@ def build_job_tree():
             all_jobs[qno] = {
                 'state': state,
                 'job_type': job.get('type', ''),
-                'model': job.get('model', ''),
+                'model_type': job.get('model_type', ''),
                 'tool_name': job.get('tool_name', ''),
                 'name': job.get('name', ''),
                 'parent': job.get('parent', 0),
@@ -491,13 +433,17 @@ def get_job_details(qno):
                 return {'error': 'job.toml not found'}
             with open(toml_path) as f:
                 job = json.load(f)
-            model_type = ''
-            model_name = job.get('model', '')
-            if model_name:
+
+            # Read model_type directly from job.toml
+            model_type = job.get('model_type', '')
+            # Resolve server model name from config
+            model_name = ''
+            if model_type:
                 for m in config.get('models', []):
-                    if m.get('name') == model_name:
-                        model_type = m.get('type', '')
+                    if m.get('type') == model_type:
+                        model_name = m.get('name', '')
                         break
+
             output = None
             output_path = os.path.join(job_dir, 'output.txt')
             if os.path.exists(output_path):
@@ -507,8 +453,8 @@ def get_job_details(qno):
                 'state': state,
                 'name': job.get('name', ''),
                 'job_type': job.get('type', ''),
-                'model': model_name,
                 'model_type': model_type,
+                'model_name': model_name,
                 'tool_name': job.get('tool_name', ''),
                 'start_after': job.get('start_after', ''),
                 'max_job_duration': job.get('max_job_duration', ''),
@@ -566,7 +512,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             max_duration = data.get('max_duration', '')
             rags = data.get('rags', [])
 
-            # Build the init.py command
             cmd = [sys.executable, 'init.py', prompt]
             if mtype:
                 cmd.extend(['--mtype', mtype])
@@ -581,7 +526,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                # Extract job number from stderr (init.py prints "Job X created." to stderr)
                 import re
                 match = re.search(r'Job (\d+) created', result.stderr)
                 if match:
