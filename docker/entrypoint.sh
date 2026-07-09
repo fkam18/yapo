@@ -1,6 +1,8 @@
 #!/bin/bash
-# Start scheduler in background, redirect stderr to a shared log file
-python3 yapo.py 2>/tmp/yapo_scheduler.log &
-
-# Start dashboard in foreground
+mkdir -p /home/yapo/yapo_root/jobs/{ready,processing,pending,done,error}
+mkfifo /home/yapo/yapo_root/event.pipe 2>/dev/null || true
+python3 yapo.py &
 python3 dashboard.py
+
+
+

@@ -6,6 +6,7 @@ Works with Ollama, llama.cpp, DeepSeek, Together, Groq, etc.
 
 import os, json, urllib.request, urllib.error, socket, sys
 from datetime import datetime
+from log import log_write
 
 # Set to False to disable debug dumping to /tmp/openai.txt
 DEBUG_DUMP = os.environ.get('CONN_OPENAI_DEBUG', 'false').lower() == 'true'
@@ -58,13 +59,11 @@ def generate(server_config: dict, model: str, prompt: str, options: dict, image_
     try:
         with urllib.request.urlopen(req, timeout=300) as resp:
             result = json.loads(resp.read().decode('utf-8'))
-
+     
             if DEBUG_DUMP:
-                with open('/tmp/openai.txt', 'a') as f:
-                    f.write(f"\n=== {datetime.now()} ===\n")
-                    f.write(json.dumps(result, indent=2))
-                    f.write("\n")
-
+                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                log_write(f"openai {ts}: === API Call ===\n{json.dumps(result, indent=2)}")
+       
             return result["choices"][0]["message"]["content"].strip()
     except urllib.error.HTTPError as e:
         body = e.read().decode() if e.fp else ""

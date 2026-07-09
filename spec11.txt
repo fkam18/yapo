@@ -367,3 +367,70 @@ At runtime, the runner:
 19. Open Issues
 ----------------
 None. All design questions resolved.
+
+ADDENDUM – spec11.txt (2026-07-09)
+====================================
+
+A. Central Logging Module (log.py)
+------------------------------------
+A new module `log.py` provides thread‑safe, non‑blocking log write and
+destructive log read operations.
+
+  log_write(line)
+      Appends a line to /tmp/yapo.log under a file lock (fcntl.flock).
+      If the lock cannot be acquired within 1 second, the line is silently
+      dropped.  If the file exceeds 1 MB (MAX_SIZE), it is automatically
+      truncated to zero before the write.
+
+  log_read(max_lines=100)
+      Reads and returns the last `max_lines` lines from /tmp/yapo.log,
+      then truncates the file to zero (destructive read).  No locking is
+      used on read.
+
+All previous FIFO‑based logging (log.pipe) has been removed.  The log
+file replaces the pipe, eliminating blocking writes and the need for
+background drain processes.
+
+B. Log Line Format
+--------------------
+Every log line is prefixed with a source tag and timestamp:
+
+  yapo 2026-07-09 22:00:01: <message>
+  openai 2026-07-09 22:00:15: === API Call === ...
+
+yapo.py writes via a custom stderr wrapper (`LogStderr`) that calls
+log_write() with the "yapo" prefix.  conn_openai.py calls log_write()
+directly with the "openai" prefix when CONN_OPENAI_DEBUG is true.
+
+C. Dashboard Changes
+----------------------
+- `/api/logs` now calls log_read() instead of reading a FIFO.  Returns
+  immediately with available lines (non‑blocking).
+- `/api/debug/openai` removed.  Consumers filter openai lines with
+  `grep openai` on the /api/logs output.
+- `/api/stream` (SSE) remains on a named pipe (event.pipe) for UI refresh
+  signalling.  This pipe carries only 1‑byte events and does not block
+  writers (O_NONBLOCK).  The SSE handler runs in its own thread via
+  ThreadingHTTPServer.
+
+D. entrypoint.sh (Simplified)
+-------------------------------
+No log pipe, no drain process.  Only the SSE event pipe is created.
+
+  #!/bin/bash
+  mkdir -p /home/yapo/yapo_root/jobs/{ready,processing,pending,done,error}
+  mkfifo /home/yapo/yapo_root/event.pipe 2>/dev/null || true
+  python3 yapo.py &
+  python3 dashboard.py
+
+E. conn_openai.py
+-------------------
+DEBUG_DUMP now writes to log_write() instead of a separate file or pipe.
+The environment variable CONN_OPENAI_DEBUG controls whether API calls
+are logged.
+
+F. yapo.py
+------------
+The custom `LogStderr` class replaces the previous `PrefixedStderr`.
+All stderr output is routed through log_write() with the "yapo" prefix
+and timestamp.

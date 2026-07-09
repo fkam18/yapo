@@ -17,6 +17,9 @@ YAPO_ROOT = get_yapo_root()
 JOBS_DIR = os.path.join(YAPO_ROOT, 'jobs')
 LOCK_FILE = os.path.join(YAPO_ROOT, 'jobber.lock')
 
+# Named pipe for SSE event signalling
+SIGNAL_PIPE = os.path.join(YAPO_ROOT, 'event.pipe')
+
 def acquire_lock():
     """Acquire exclusive lock."""
     os.makedirs(JOBS_DIR, exist_ok=True)
@@ -50,6 +53,13 @@ def move_job_folder(qno, from_state, to_state):
     if os.path.exists(src):
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.move(src, dst)
+        # Signal SSE clients
+        try:
+            fd = os.open(SIGNAL_PIPE, os.O_WRONLY | os.O_NONBLOCK)
+            os.write(fd, b'x')
+            os.close(fd)
+        except:
+            pass
         return True
     return False
 
@@ -134,6 +144,13 @@ def create_job(type, state='ready', model_type='', parent=0, prompt_text='',
                             f.write(file_content)
                     except Exception as e:
                         print(f"Warning: failed to save attachment {filename}: {e}", file=sys.stderr)
+        # Signal SSE clients
+        try:
+            fd = os.open(SIGNAL_PIPE, os.O_WRONLY | os.O_NONBLOCK)
+            os.write(fd, b'x')
+            os.close(fd)
+        except:
+            pass
 
         print(qno)
         return qno

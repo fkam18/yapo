@@ -9,6 +9,28 @@ from jobber import list_jobs, move_job_folder, acquire_lock, release_lock
 from config import load_config, get_server, get_tool, get_yapo_root, get_max_job_duration
 YAPO_ROOT = get_yapo_root()
 
+import sys
+from datetime import datetime
+from log import log_write
+
+class LogStderr:
+    def __init__(self):
+        self.buffer = ''
+    def write(self, data):
+        self.buffer += data
+        while '\n' in self.buffer:
+            line, self.buffer = self.buffer.split('\n', 1)
+            if line.strip():
+                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                log_write(f"yapo {ts}: {line}")
+    def flush(self):
+        if self.buffer.strip():
+            ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            log_write(f"yapo {ts}: {self.buffer}")
+            self.buffer = ''
+
+sys.stderr = LogStderr()
+
 def reload_config_signal(signum, frame):
     """Reload config on SIGHUP."""
     global _config

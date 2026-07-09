@@ -14,11 +14,17 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from config import load_config
 from jobber import create_job, JOBS_DIR
+from log import log_read
 
 # Load Yapo configuration
 config = load_config()
 YAPO_ROOT = config['yapo_root']
 JOBS_DIR = os.path.join(YAPO_ROOT, 'jobs')
+
+# Named pipe for SSE events
+SIGNAL_PIPE = os.path.join(YAPO_ROOT, 'event.pipe')
+if not os.path.exists(SIGNAL_PIPE):
+    os.mkfifo(SIGNAL_PIPE)
 
 # Done and error first, then processing, pending, ready
 STATES = ['done', 'error', 'processing', 'pending', 'ready']
@@ -393,8 +399,14 @@ function updateTotalBadge() {
     document.getElementById('total-badge').textContent = total;
 }
 
-setInterval(refreshQueues, 2000);
+// SSE event-driven refresh
+var eventSource = new EventSource('/api/stream');
+eventSource.onmessage = function(event) {
+    refreshQueues();
+};
+refreshQueues();
 updateTotalBadge();
+
 </script>
 
 </body>
@@ -564,38 +576,56 @@ class DashboardHandler(BaseHTTPRequestHandler):
             html = build_queue_html()
             self.wfile.write(html.encode())
 
+        elif path == '/api/stream':
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            try:
+                while True:
+                    with open(SIGNAL_PIPE, 'rb') as f:
+                        f.read(1)  # blocks until event
+                    self.wfile.write(b"data: refresh\n\n")
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+
         elif path == '/api/logs':
-            log_path = '/tmp/yapo_scheduler.log'
             query = parse_qs(parsed.query)
             lines = int(query.get('lines', [100])[0])
-            try:
-                with open(log_path) as f:
-                    all_lines = f.readlines()
-                    recent = all_lines[-lines:]
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'text/plain')
-                    self.end_headers()
-                    self.wfile.write(''.join(recent).encode())
-            except FileNotFoundError:
-                self.send_response(503)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({'error': 'Log not available yet'}).encode())
+            result = log_read(lines)
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(result.encode())
 
         elif path == '/api/debug/openai':
-            debug_path = '/tmp/openai.txt'
-            if os.path.exists(debug_path):
+            log_pipe = os.path.join(YAPO_ROOT, 'log.pipe')
+            try:
+                lines = []
+                fd = os.open(log_pipe, os.O_RDONLY | os.O_NONBLOCK)
+                while True:
+                    try:
+                        data = os.read(fd, 4096)
+                        if not data:
+                            break
+                        lines.extend(data.decode(errors='replace').split('\n'))
+                    except BlockingIOError:
+                        break
+                os.close(fd)
+                openai_lines = [l for l in lines if 'openai ' in l]
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/plain')
-                self.send_header('Content-Disposition', 'attachment; filename="openai.txt"')
+                self.send_header('Content-Disposition', 'attachment; filename="openai_debug.txt"')
                 self.end_headers()
-                with open(debug_path, 'rb') as f:
-                    self.wfile.write(f.read())
-            else:
+                self.wfile.write('\n'.join(openai_lines).encode())
+            except FileNotFoundError:
                 self.send_response(404)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                self.wfile.write(json.dumps({'error': 'Debug log not found. Set DEBUG_DUMP=True in conn_openai.py'}).encode())
+                self.wfile.write(json.dumps({'error': 'Log not available'}).encode())
 
         elif path == '/api/health':
             self.send_response(200)
@@ -880,8 +910,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         pass
 
 
+from http.server import ThreadingHTTPServer
+
 def main():
-    server = HTTPServer(('0.0.0.0', 3388), DashboardHandler)
+    server = ThreadingHTTPServer(('0.0.0.0', 3388), DashboardHandler)
     print("Yapo dashboard running at http://0.0.0.0:3388")
     try:
         server.serve_forever()
