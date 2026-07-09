@@ -9,6 +9,16 @@ from jobber import list_jobs, move_job_folder, acquire_lock, release_lock
 from config import load_config, get_server, get_tool, get_yapo_root, get_max_job_duration
 YAPO_ROOT = get_yapo_root()
 
+def reload_config_signal(signum, frame):
+    """Reload config on SIGHUP."""
+    global _config
+    from config import load_config
+    _config = None
+    load_config()
+    print("Config reloaded via SIGHUP", file=sys.stderr)
+
+signal.signal(signal.SIGHUP, reload_config_signal)
+
 # ---------- capacity tracker ----------
 server_capacity = {}
 tool_capacity = {}

@@ -4,22 +4,33 @@ OpenAI‑compatible backend connector.
 Works with Ollama, llama.cpp, DeepSeek, Together, Groq, etc.
 """
 
-import json, urllib.request, urllib.error, socket, sys
+import os, json, urllib.request, urllib.error, socket, sys
 from datetime import datetime
 
 # Set to False to disable debug dumping to /tmp/openai.txt
-DEBUG_DUMP = True
+DEBUG_DUMP = os.environ.get('CONN_OPENAI_DEBUG', 'false').lower() == 'true'
 
-def generate(server_config: dict, model: str, prompt: str, options: dict) -> str:
+def generate(server_config: dict, model: str, prompt: str, options: dict, image_data: list = None) -> str:
     """
     Send a prompt to an OpenAI‑compatible API and return the response text.
+    
+    Args:
+        image_data: optional list of dicts with 'data' (base64) and 'mime' (e.g. 'image/jpeg')
     """
     base_url = server_config['url'].rstrip('/')
     api_url = f"{base_url}/v1/chat/completions"
 
-    messages = [
-        {"role": "user", "content": prompt}
-    ]
+    # Build messages – support multimodal if images are present
+    if image_data:
+        content = [{"type": "text", "text": prompt}]
+        for img in image_data:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{img['mime']};base64,{img['data']}"}
+            })
+        messages = [{"role": "user", "content": content}]
+    else:
+        messages = [{"role": "user", "content": prompt}]
 
     payload = {
         "model": model,
@@ -54,7 +65,6 @@ def generate(server_config: dict, model: str, prompt: str, options: dict) -> str
                     f.write(json.dumps(result, indent=2))
                     f.write("\n")
 
-            # Extract the response text
             return result["choices"][0]["message"]["content"].strip()
     except urllib.error.HTTPError as e:
         body = e.read().decode() if e.fp else ""
@@ -64,10 +74,7 @@ def generate(server_config: dict, model: str, prompt: str, options: dict) -> str
 
 
 def server_reachable(server_config: dict, debug: bool = False) -> bool:
-    """
-    Check if the OpenAI‑compatible backend is responding.
-    Uses the /v1/models endpoint first, then falls back to a TCP connect.
-    """
+    """Check if the OpenAI‑compatible backend is responding."""
     base_url = server_config['url'].rstrip('/')
     health_url = f"{base_url}/v1/models"
 

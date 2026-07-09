@@ -9,7 +9,7 @@ Theme is loaded from dashboard.theme.
 Includes a job submission form with file attachments.
 """
 
-import os, json, subprocess, sys, re, base64
+import os, json, subprocess, sys, re, base64, time, shutil, signal
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from config import load_config
@@ -86,7 +86,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
       <div class="form-row">
         <label>Attachments (optional)</label>
-        <input type="file" id="job-attachments" multiple />
+        <input type="file" id="job-attachments" multiple style="display:none" />
+        <button type="button" class="btn btn-secondary" onclick="document.getElementById('job-attachments').click()" style="font-size:0.85rem">Browse files...</button>
         <ul id="attachment-list" style="list-style:none;padding:0;margin-top:4px"></ul>
       </div>
 
@@ -108,6 +109,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="modal-footer">
       <span id="submit-status"></span>
       <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-secondary" onclick="resetForm()">Reset</button>
       <button class="btn btn-primary" onclick="submitJob()">Submit Job</button>
     </div>
   </div>
@@ -145,24 +147,39 @@ var currentRawJson = '';
 var currentDisplayText = '';
 var attachedFiles = [];
 
-function openModal() { document.getElementById('submit-modal').style.display = 'flex'; }
+function openModal() {
+    document.getElementById('job-prompt').value = '';
+    document.getElementById('job-mtype').value = '';
+    document.getElementById('job-name').value = '';
+    document.getElementById('job-start-after').value = '';
+    document.getElementById('job-max-duration').value = '';
+    document.getElementById('job-attachments').value = '';
+    document.getElementById('attachment-list').innerHTML = '';
+    attachedFiles = [];
+    document.getElementById('submit-status').textContent = '';
+    document.getElementById('rag-entries').innerHTML = '<div class="rag-entry"><select class="rag-tool"><option value="mem_read">mem_read</option><option value="web_search">web_search</option></select><input type="text" class="rag-query" placeholder="Search query"><button class="rag-remove" onclick="removeRagEntry(this)" title="Remove">\u00d7</button></div>';
+    document.getElementById('submit-modal').style.display = 'flex';
+}
+
+function resetForm() { openModal(); }
 function closeModal() { document.getElementById('submit-modal').style.display = 'none'; }
 window.onclick = function(event) {
     if (event.target === document.getElementById('submit-modal')) closeModal();
 };
 
-// ── Attachment handling ──
 document.getElementById('job-attachments').addEventListener('change', function(e) {
-    attachedFiles = Array.from(e.target.files);
+    var newFiles = Array.from(e.target.files);
+    attachedFiles = attachedFiles.concat(newFiles);
     var list = document.getElementById('attachment-list');
     list.innerHTML = '';
     attachedFiles.forEach(function(file, i) {
         var li = document.createElement('li');
         li.style.fontSize = '0.8rem';
         li.style.color = 'var(--text-muted)';
-        li.innerHTML = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB) <span onclick="removeAttachment(' + i + ')" style="cursor:pointer;color:var(--danger)">&times;</span>';
+        li.innerHTML = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB) <span onclick="removeAttachment(' + i + ')" style="cursor:pointer;color:var(--danger)">\u00d7</span>';
         list.appendChild(li);
     });
+    this.value = '';
 });
 
 function removeAttachment(i) {
@@ -173,17 +190,16 @@ function removeAttachment(i) {
         var li = document.createElement('li');
         li.style.fontSize = '0.8rem';
         li.style.color = 'var(--text-muted)';
-        li.innerHTML = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB) <span onclick="removeAttachment(' + idx + ')" style="cursor:pointer;color:var(--danger)">&times;</span>';
+        li.innerHTML = file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB) <span onclick="removeAttachment(' + idx + ')" style="cursor:pointer;color:var(--danger)">\u00d7</span>';
         list.appendChild(li);
     });
 }
 
-// ── RAG entries ──
 function addRagEntry() {
     var container = document.getElementById('rag-entries');
     var entry = document.createElement('div');
     entry.className = 'rag-entry';
-    entry.innerHTML = '<select class="rag-tool"><option value="mem_read">mem_read</option><option value="web_search">web_search</option></select><input type="text" class="rag-query" placeholder="Search query" /><button class="rag-remove" onclick="removeRagEntry(this)" title="Remove">&times;</button>';
+    entry.innerHTML = '<select class="rag-tool"><option value="mem_read">mem_read</option><option value="web_search">web_search</option></select><input type="text" class="rag-query" placeholder="Search query"><button class="rag-remove" onclick="removeRagEntry(this)" title="Remove">\u00d7</button>';
     container.appendChild(entry);
 }
 function removeRagEntry(btn) {
@@ -191,7 +207,6 @@ function removeRagEntry(btn) {
     if (entries.length > 1) btn.parentElement.remove();
 }
 
-// ── Submit ──
 function submitJob() {
     var prompt = document.getElementById('job-prompt').value.trim();
     if (!prompt) { alert('Please enter a prompt.'); return; }
@@ -206,22 +221,18 @@ function submitJob() {
         var query = entry.querySelector('.rag-query').value.trim();
         if (query) rags.push(tool + ':' + query);
     });
-
-    // Encode attachments as base64
     var attachments = [];
     var filesToProcess = attachedFiles.length;
     if (filesToProcess === 0) {
         sendSubmit({ prompt: prompt, mtype: mtype, name: name, start_after: startAfter, max_duration: maxDuration, rags: rags, attachments: [] });
         return;
     }
-
     attachedFiles.forEach(function(file) {
         var reader = new FileReader();
         reader.onload = function(e) {
-            var base64content = e.target.result.split(',')[1];
             attachments.push({
                 filename: file.name,
-                content: base64content,
+                content: e.target.result.split(',')[1],
                 mime: file.type || 'application/octet-stream'
             });
             filesToProcess--;
@@ -235,7 +246,7 @@ function submitJob() {
 
 function sendSubmit(payload) {
     var statusEl = document.getElementById('submit-status');
-    statusEl.textContent = 'Submitting…';
+    statusEl.textContent = 'Submitting...';
     statusEl.style.color = 'var(--text-muted)';
     fetch('/api/submit', {
         method: 'POST',
@@ -250,26 +261,25 @@ function sendSubmit(payload) {
     .catch(function() { statusEl.textContent = 'Network error'; statusEl.style.color = 'var(--danger)'; });
 }
 
-// ── Queue / job display (unchanged) ──
 function toggleQueue(header) { header.parentElement.classList.toggle('collapsed'); }
 
 function showPage(queueName, page) {
   pageNumbers[queueName] = page;
-  let allItems = document.querySelectorAll('#list-' + queueName + ' .job-page');
+  var allItems = document.querySelectorAll('#list-' + queueName + ' .job-page');
   allItems.forEach(function(el) { el.style.display = 'none'; });
-  let pageEl = document.getElementById('page-' + queueName + '-' + page);
+  var pageEl = document.getElementById('page-' + queueName + '-' + page);
   if (pageEl) pageEl.style.display = 'block';
-  let btns = document.querySelectorAll('#pager-' + queueName + ' button');
+  var btns = document.querySelectorAll('#pager-' + queueName + ' button');
   btns.forEach(function(b) { b.classList.remove('active'); });
-  let activeBtn = document.getElementById('btn-' + queueName + '-' + page);
+  var activeBtn = document.getElementById('btn-' + queueName + '-' + page);
   if (activeBtn) activeBtn.classList.add('active');
 }
 
 function loadJob(qno) {
     fetch('/api/job/' + qno)
-        .then(response => response.json())
-        .then(data => {
-            let detail = document.getElementById('right');
+        .then(function(response) { return response.json(); })
+        .then(function(data) {
+            var detail = document.getElementById('right');
             if (data.error) {
                 detail.innerHTML = '<h2>Error</h2><p>' + data.error + '</p>';
             } else {
@@ -277,10 +287,10 @@ function loadJob(qno) {
                 currentRawJson = displayOutput;
                 if (displayOutput) {
                     var cleaned = displayOutput.trim();
-                    if (cleaned.startsWith('```')) {
+                    if (cleaned.indexOf('```') === 0) {
                         var firstNewline = cleaned.indexOf('\n');
                         if (firstNewline !== -1) cleaned = cleaned.substring(firstNewline + 1);
-                        if (cleaned.endsWith('```')) cleaned = cleaned.substring(0, cleaned.length - 3).trim();
+                        if (cleaned.lastIndexOf('```') === cleaned.length - 3) cleaned = cleaned.substring(0, cleaned.length - 3).trim();
                     }
                     try {
                         var parsed = JSON.parse(cleaned);
@@ -291,11 +301,9 @@ function loadJob(qno) {
                     } catch(e) {}
                 }
                 currentDisplayText = displayOutput;
-
-                let html = '';
+                var html = '';
                 if (data.name) html += '<h2>' + escapeHtml(data.name) + ' <span style="color:var(--text-muted);font-size:0.8rem;font-weight:400">(#' + qno + ')</span></h2>';
                 else html += '<h2>Job ' + qno + '</h2>';
-
                 html += '<div class="meta">';
                 html += '<span><b>State:</b> ' + data.state + '</span>';
                 html += '<span><b>Job type:</b> ' + data.job_type + '</span>';
@@ -305,7 +313,6 @@ function loadJob(qno) {
                 if (data.start_after) html += '<span><b>Start after:</b> ' + data.start_after + '</span>';
                 if (data.max_job_duration) html += '<span><b>Max duration:</b> ' + data.max_job_duration + 's</span>';
                 html += '</div>';
-
                 if (data.output) {
                     html += '<div style="display:flex;align-items:center;gap:10px;margin-top:16px">';
                     html += '<h3 style="margin:0">Output</h3>';
@@ -322,8 +329,8 @@ function loadJob(qno) {
 }
 
 function toggleRaw() {
-    let btn = document.getElementById('raw-btn');
-    let block = document.getElementById('output-block');
+    var btn = document.getElementById('raw-btn');
+    var block = document.getElementById('output-block');
     if (btn.textContent === 'Show raw') {
         btn.textContent = 'Show answer'; block.textContent = currentRawJson; currentDisplayText = currentRawJson;
     } else {
@@ -345,35 +352,43 @@ function copyOutput() {
 function escapeHtml(text) { return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
 function toggleSubs(qno) {
-    let subs = document.getElementById('subs-' + qno);
-    let toggle = document.getElementById('toggle-' + qno);
-    if (subs.style.display === 'none') { subs.style.display = 'block'; toggle.textContent = '\u25BC'; expandedJobs[qno] = true; }
-    else { subs.style.display = 'none'; toggle.textContent = '\u25B6'; expandedJobs[qno] = false; }
+    var subs = document.getElementById('subs-' + qno);
+    var toggle = document.getElementById('toggle-' + qno);
+    if (subs.style.display === 'none') { subs.style.display = 'block'; toggle.textContent = '\u25bc'; expandedJobs[qno] = true; }
+    else { subs.style.display = 'none'; toggle.textContent = '\u25b6'; expandedJobs[qno] = false; }
 }
 
 function restoreToggles() {
-    Object.keys(expandedJobs).forEach(function(qno) {
-        let subs = document.getElementById('subs-' + qno);
-        let toggle = document.getElementById('toggle-' + qno);
-        if (subs && toggle) {
-            if (expandedJobs[qno]) { subs.style.display = 'block'; toggle.textContent = '\u25BC'; }
-            else { subs.style.display = 'none'; toggle.textContent = '\u25B6'; }
-        }
-    });
-    document.querySelectorAll('.toggle').forEach(function(el) { el.onclick = function() { toggleSubs(this.getAttribute('data-qno')); }; });
-    document.querySelectorAll('.queue-header').forEach(function(el) { el.onclick = function() { toggleQueue(this); }; });
-    Object.keys(pageNumbers).forEach(function(q) { showPage(q, pageNumbers[q] || 1); });
+    setTimeout(function() {
+        Object.keys(expandedJobs).forEach(function(qno) {
+            var subs = document.getElementById('subs-' + qno);
+            var toggle = document.getElementById('toggle-' + qno);
+            if (subs && toggle) {
+                if (expandedJobs[qno]) { subs.style.display = 'block'; toggle.textContent = '\u25bc'; }
+                else { subs.style.display = 'none'; toggle.textContent = '\u25b6'; }
+            }
+        });
+        document.querySelectorAll('.toggle').forEach(function(el) {
+            el.onclick = function() { toggleSubs(this.getAttribute('data-qno')); };
+        });
+        document.querySelectorAll('.queue-header').forEach(function(el) {
+            el.onclick = function() { toggleQueue(this); };
+        });
+        Object.keys(pageNumbers).forEach(function(q) {
+            showPage(q, pageNumbers[q] || 1);
+        });
+    }, 50);
 }
 
 function refreshQueues() {
-    fetch('/api/queues').then(response => response.text()).then(html => {
+    fetch('/api/queues').then(function(response) { return response.text(); }).then(function(html) {
         document.getElementById('left-scroll').innerHTML = html;
         restoreToggles(); updateTotalBadge();
     });
 }
 
 function updateTotalBadge() {
-    let total = 0;
+    var total = 0;
     document.querySelectorAll('.count').forEach(function(el) { total += parseInt(el.textContent) || 0; });
     document.getElementById('total-badge').textContent = total;
 }
@@ -381,6 +396,7 @@ function updateTotalBadge() {
 setInterval(refreshQueues, 2000);
 updateTotalBadge();
 </script>
+
 </body>
 </html>"""
 
@@ -566,11 +582,111 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': 'Log not available yet'}).encode())
 
+        elif path == '/api/debug/openai':
+            debug_path = '/tmp/openai.txt'
+            if os.path.exists(debug_path):
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain')
+                self.send_header('Content-Disposition', 'attachment; filename="openai.txt"')
+                self.end_headers()
+                with open(debug_path, 'rb') as f:
+                    self.wfile.write(f.read())
+            else:
+                self.send_response(404)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'Debug log not found. Set DEBUG_DUMP=True in conn_openai.py'}).encode())
+
         elif path == '/api/health':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({"status": "ok"}).encode())
+
+        elif path == '/api/tree':
+            tree = build_job_tree()
+            result = {}
+            for qno, info in tree.items():
+                result[str(qno)] = {
+                    'state': info['state'],
+                    'job_type': info['job_type'],
+                    'name': info.get('name', ''),
+                    'model_type': info.get('model_type', ''),
+                    'tool_name': info.get('tool_name', ''),
+                    'parent': info['parent'],
+                    'children': info['children']
+                }
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(result).encode())
+
+        elif path == '/api/config':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            # Reload config to get latest (in case it was updated externally)
+            current_config = load_config()
+            self.wfile.write(json.dumps(current_config, indent=2).encode())
+
+        elif path.startswith('/api/job/') and 'wait=true' in parsed.query:
+            qno = path.split('/')[-1]
+            query = parse_qs(parsed.query)
+            timeout = int(query.get('timeout', [300])[0])
+            
+            start_time = time.time()
+            while True:
+                details = get_job_details(qno)
+                state = details.get('state', '')
+                
+                if state in ('done', 'error'):
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps(details).encode())
+                    return
+                
+                elapsed = time.time() - start_time
+                if timeout > 0 and elapsed >= timeout:
+                    details['timed_out'] = True
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps(details).encode())
+                    return
+                
+                time.sleep(2)
+
+        elif path.startswith('/api/job/') and path.endswith('/download'):
+            qno = path.split('/')[-2]
+            job_dir = None
+            for state in STATES:
+                d = os.path.join(JOBS_DIR, state, str(qno))
+                if os.path.isdir(d):
+                    job_dir = d
+                    break
+            if not job_dir:
+                self.send_response(404)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'Job not found'}).encode())
+                return
+            
+            import tarfile, io
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode='w:gz') as tar:
+                for root, dirs, files in os.walk(job_dir):
+                    for fname in files:
+                        fpath = os.path.join(root, fname)
+                        arcname = os.path.relpath(fpath, job_dir)
+                        tar.add(fpath, arcname=arcname)
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/gzip')
+            self.send_header('Content-Disposition', f'attachment; filename="job_{qno}.tar.gz"')
+            self.send_header('Content-Length', str(buf.tell()))
+            self.end_headers()
+            self.wfile.write(buf.getvalue())
 
         elif path.startswith('/api/job/'):
             qno = path.split('/')[-1]
@@ -601,7 +717,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             rags = data.get('rags', [])
             attachments = data.get('attachments', [])
 
-            # Validate attachments
             valid_attachments = []
             for att in attachments:
                 if att.get('filename') and att.get('content'):
@@ -612,7 +727,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     })
 
             try:
-                # Create the job directly via jobber's Python API
                 qno = create_job(
                     type='main',
                     state='pending' if rags else 'ready',
@@ -624,7 +738,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     attachments=valid_attachments
                 )
 
-                # Create RAG tool children if requested
                 if rags:
                     for rag_spec in rags:
                         tool_name, query = rag_spec.split(':', 1)
@@ -636,7 +749,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             tool_name=tool_name,
                             tool_json=tool_json_str
                         )
+                        from jobber import move_job_folder
                         move_job_folder(sub_qno, 'pending', 'ready')
+                    from jobber import move_job_folder
                     move_job_folder(qno, 'pending', 'ready')
 
                 response = {'success': True, 'qno': str(qno)}
@@ -648,6 +763,115 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(response).encode())
 
+        elif path == '/api/reload':
+            # Send SIGHUP to yapo.py to reload config
+            try:
+                # Find yapo.py PID
+                result = subprocess.run(['pgrep', '-f', 'python3 yapo.py'], capture_output=True, text=True)
+                pids = result.stdout.strip().split('\n')
+                for pid in pids:
+                    if pid:
+                        os.kill(int(pid), signal.SIGHUP)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'message': 'Config reload signal sent'}).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+        elif path == '/api/config':
+            content_length = int(self.headers['Content-Length'])
+            body = self.rfile.read(content_length)
+            data = json.loads(body)
+            
+            key = data.get('key', '')
+            value = data.get('value', '')
+            
+            if key == 'CONN_OPENAI_DEBUG':
+                if str(value).lower() in ('true', '1', 'yes'):
+                    os.environ['CONN_OPENAI_DEBUG'] = 'true'
+                else:
+                    os.environ['CONN_OPENAI_DEBUG'] = 'false'
+                import conn_openai
+                conn_openai.DEBUG_DUMP = os.environ['CONN_OPENAI_DEBUG'] == 'true'
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'CONN_OPENAI_DEBUG': os.environ['CONN_OPENAI_DEBUG']}).encode())
+            else:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': f'Unknown config key: {key}'}).encode())
+
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_DELETE(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        
+        if path.startswith('/api/job/'):
+            qno = path.split('/')[-1]
+            tree = build_job_tree()
+            
+            # Collect all descendants recursively
+            to_delete = set()
+            def collect_descendants(q):
+                to_delete.add(int(q))
+                for child in tree.get(int(q), {}).get('children', []):
+                    collect_descendants(child)
+            collect_descendants(qno)
+            
+            # Delete all collected jobs
+            deleted_list = []
+            for q in to_delete:
+                for state in STATES:
+                    job_dir = os.path.join(JOBS_DIR, state, str(q))
+                    if os.path.isdir(job_dir):
+                        shutil.rmtree(job_dir)
+                        deleted_list.append(str(q))
+                        break
+            
+            if deleted_list:
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'success': True, 'deleted': deleted_list, 'count': len(deleted_list)}).encode())
+            else:
+                self.send_response(404)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'Job not found'}).encode())
+        
+        elif path.startswith('/api/jobs'):
+            query = parse_qs(parsed.query)
+            from_q = int(query.get('from', [0])[0])
+            to_q = int(query.get('to', [0])[0])
+            state_filter = query.get('state', [None])[0]
+            
+            deleted = []
+            for state in (STATES if not state_filter else [state_filter]):
+                state_dir = os.path.join(JOBS_DIR, state)
+                if not os.path.isdir(state_dir):
+                    continue
+                for name in os.listdir(state_dir):
+                    if name.isdigit():
+                        q = int(name)
+                        if q >= from_q and q <= to_q:
+                            shutil.rmtree(os.path.join(state_dir, name))
+                            deleted.append(str(q))
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'deleted': deleted, 'count': len(deleted)}).encode())
+        
         else:
             self.send_response(404)
             self.end_headers()

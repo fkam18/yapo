@@ -3,6 +3,7 @@ services:
     image: yapo:latest
     container_name: yapo
     restart: unless-stopped
+    network_mode: host
     ports:
       - "3388:3388"
     volumes:

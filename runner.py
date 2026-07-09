@@ -3,7 +3,7 @@
 Runner – executes a single job.
 """
 
-import os, sys, json, subprocess, time, re
+import os, sys, json, subprocess, time, re, base64
 from conn_openai import generate as call_openai
 from jobber import read_job_toml, move_job_folder, JOBS_DIR, acquire_lock, release_lock
 from config import load_config, get_tool, get_server, get_model_for_type, get_yapo_root
@@ -13,8 +13,8 @@ JOBS_DIR = os.path.join(YAPO_ROOT, 'jobs')
 TOOL_CACHE = os.path.join(YAPO_ROOT, '.tool_cache.json')
 
 # ---------- LLM / MCP helpers ----------
-def call_backend(server, model, prompt, options):
-    return call_openai(server, model, prompt, options)
+def call_backend(server, model, prompt, options, image_data=None):
+    return call_openai(server, model, prompt, options, image_data)
 
 def call_mcp_tool(tool, arguments):
     mcp_server_name = tool['mcp_server']
@@ -98,6 +98,25 @@ def call_mcp_tool(tool, arguments):
         pass
     else:
         raise Exception(f"Unknown transport {mcp_srv['transport']}")
+
+
+def collect_image_data(job_folder):
+    """Collect base64-encoded images from the job's assets/ folder."""
+    assets_dir = os.path.join(job_folder, 'assets')
+    if not os.path.isdir(assets_dir):
+        return []
+    
+    image_exts = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
+    images = []
+    for filename in sorted(os.listdir(assets_dir)):
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in image_exts:
+            filepath = os.path.join(assets_dir, filename)
+            with open(filepath, 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode('utf-8')
+                mime = 'image/jpeg' if ext in ('.jpg', '.jpeg') else f'image/{ext[1:]}'
+                images.append({'data': b64, 'mime': mime})
+    return images
 
 
 def inject_attachments(job_folder, context_text):
@@ -423,6 +442,9 @@ def main():
         with open(ctx_path) as f:
             turn_number = len([line for line in f if line.startswith('[TOOL:')])
 
+    # Collect images for multimodal models
+    image_data = collect_image_data(job_folder)
+
     print(f"Job {qno} calling LLM {server_model_name} on {server_name}...", file=sys.stderr)
     prompt = build_prompt(job, config, turn_number)
     with open(os.path.join(job_folder, 'full_prompt.txt'), 'w') as f:
@@ -439,7 +461,7 @@ def main():
         options['stop'] = model_cfg['stop']
 
     try:
-        response = call_backend(server, server_model_name, prompt, options)
+        response = call_backend(server, server_model_name, prompt, options, image_data if image_data else None)
         with open(os.path.join(job_folder, 'output.txt'), 'w') as f:
             f.write(response)
 

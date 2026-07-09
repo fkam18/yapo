@@ -47,3 +47,6 @@
         status_code: 200
       retries: 10
       delay: 5
+
+    - name: Clean up old Docker images
+      command: docker image prune -a -f
