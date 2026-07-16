@@ -1,0 +1,151 @@
+# Orchestrator Design v14 – spec14.txt (2026-07-16)
+===========================================================
+This revision refines the OpenAI‑compatible chat format introduced in v13.
+Per‑model `max_turns` replaces the hard‑coded tool‑call cycle limit, and
+the convergence note thresholds now scale dynamically with `max_turns`.
+After the first turn, the runner sends only the convergence note as the
+new user message, leaving the original task in the conversation history
+for context.  Additional API‑level parameters (e.g. `chat_template_kwargs`)
+are forwarded to the LLM backend.  The dashboard now displays tool‑call
+details and the full job output.
+
+1. Overview
+-----------
+Yapo is a home‑lab orchestrator that manages stateless LLM jobs using a
+folder‑based job pool.  A jobber serialises all state transitions.  The
+main loop (`yapo.py`) picks jobs from `ready`, respects server and tool
+capacity, and forks runner processes.  The runner assembles a structured
+OpenAI‑compatible payload, calls the LLM via a pluggable backend
+connector, and parses the standard chat‑completion response.  Context
+accumulates as a conversation transcript; when it becomes too large, the
+runner compacts it via MCP tool calls.
+
+All tool execution (memory, summarisation, web search, shell commands,
+and routing) is delegated to external MCP servers.  There are no separate
+“embed”, “summarise”, or “router” job types – these are MCP tools.
+
+LLM calls use `conn_openai.py`, which speaks the OpenAI‑compatible
+`/v1/chat/completions` protocol.
+
+2. Terminology
+---------------
+- Job type: `"main"` or `"tool"`.
+- Model type: classification string used by the router or manual
+  override.  Values include `"code"`, `"others"`, `"visual"`, etc.
+- Model name: server‑side identifier passed to the LLM backend (e.g.
+  `"qwen3-coder-30b"`).
+- `system_prompt`: a string in `config.toml` under `[[models]]`; it becomes
+  the `content` of the `"system"` role message.
+- `conversation.json`: a persistent array of message objects that
+  represents the entire dialogue with the LLM for a main job.  It contains
+  only `user`, `assistant`, and `tool` messages; the system prompt is
+  prepended at request time.
+- `max_turns`: per‑model integer (default 5) limiting the number of
+  assistant‑tool‑result cycles before the job is forced to finish.
+- `convergence_note`: dynamic instruction injected into the `"user"` role
+  message, not the system prompt.  Its wording escalates as the number of
+  completed turns approaches `max_turns`.
+
+3. Folder Structure & States
+-------------------------------
+jobs/
+  ready/
+  processing/
+  pending/
+  done/
+  error/
+
+4. Job Folder Contents
+-----------------------
+  job.toml               – job metadata (job_id, type, model_type, parent,
+                           tool_name, start_after, max_job_duration, etc.)
+  parent.<qno>           – empty marker for parent queue number
+  sub.<qno>              – empty marker per direct child
+  prompt.txt             – the original user task
+  conversation.json      – full conversation array (list of message dicts)
+                           for the main job’s LLM history
+  context.txt            – (legacy) accumulated tool results; may be
+                           phased out in favour of conversation.json
+  output.txt             – LLM response or tool result
+  full_payload.json      – (diagnostic) exact JSON payload sent to LLM
+  tool_call.json         – present in tool jobs; the entire tool‑call
+                           object from the assistant message, including
+                           the `id` (original call ID)
+  assets/                – optional attached files
+
+5. Component Summary
+---------------------
+5.1 jobber.py – unchanged except that creation of a main job now
+    initialises an empty `conversation.json` array `[]`.
+
+5.2 runner.py – major changes:
+    - Builds payload using `system_prompt` from model config and the
+      conversation history from `conversation.json`.
+    - Tools are passed as a `tools` array of function definitions.
+    - All model‑specific sampling parameters (`temperature`, `top_k`,
+      `top_p`, `max_tokens`, `repeat_penalty`, etc.) and extra API‑level
+      keys (e.g. `chat_template_kwargs`) from the model configuration
+      are included in the request payload.
+    - Per‑model `max_turns` controls the tool‑call cycle limit.
+    - Convergence note now scales with `max_turns` (see §7.3).
+    - After turn 0, the new user message contains **only** the convergence
+      note.  The original task remains in `conversation.json` history,
+      providing full context without re‑triggering tool calls.
+    - When the LLM responds with `tool_calls`, the runner:
+        1. Appends the user message to `conversation.json`.
+        2. Appends the assistant message (including `tool_calls` with
+           their original `id` values) to `conversation.json`.
+        3. Creates one tool child job per tool call, storing the exact
+           tool‑call object (with `id`) in the child’s `tool_call.json`.
+        4. Moves the main job to `pending`, waiting for all children.
+        5. When a tool child completes, its result is used to construct a
+           `"tool"` role message (`role: "tool"`, `tool_call_id`, `name`,
+           `content`), which is appended to `conversation.json`.
+    - Once all children are done, the main job returns to `ready` and
+      the next LLM call includes the full updated history.
+    - Compaction still uses MCP tools but now captures the transcript from
+      `conversation.json`.
+
+5.3 yapo.py (scheduler) – unchanged.
+
+5.4 init.py – unchanged.
+
+5.5 dashboard.py – now shows tool‑call details (function name and
+    arguments) and a dedicated section for `tool_call.json`.  Output
+    display correctly parses the new structured assistant messages.
+
+5.6 conn_openai.py – sends JSON payloads; the runner supplies the
+    `tools` array and extra API‑level parameters.  The connector returns
+    the full `choices[0].message` so that the runner can extract `content`
+    and/or `tool_calls`.  It passes through any known extra keys (e.g.
+    `chat_template_kwargs`) to the LLM backend.
+
+6. Configuration Changes
+--------------------------
+- Removed: `prompt_template` from `[[models]]`.
+- Added: `system_prompt` (string) – placed in the `"system"` message.
+- Added: `max_turns` (integer, optional, default 5) – maximum number of
+  assistant‑tool‑result cycles for this model.
+- Added: support for extra API‑level parameters such as
+  `chat_template_kwargs` (inline table) – forwarded to the LLM backend
+  if present in the model config.
+
+Example model entry:
+```toml
+[[models]]
+name = "qwen3-coder-30b"
+type = "code-qwen3"
+server = "gpu"
+tool_allowed = true
+temperature = 0.1
+max_tokens = 8192
+top_k = 20
+top_p = 0.85
+repeat_penalty = 1.05
+max_turns = 3
+chat_template_kwargs = { enable_thinking = true }
+system_prompt = """
+You are an expert assistant with access to tools.
+- Use a tool ONLY when you need information you don't already have.
+- Once you have the answer, output it immediately without any further tool calls.
+"""

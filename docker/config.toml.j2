@@ -93,8 +93,13 @@ repeat_last_n = 128
 presence_penalty = 0.0
 frequency_penalty = 0.0
 chat_template_kwargs = { enable_thinking = true }
+max_turns = 6
 system_prompt = """
-You are an expert assistant. 
+You are an expert assistant with access to tools.
+- Use a tool ONLY when you need information you don't already have.
+- When you have gathered enough information from tool results, stop calling tools and provide your final answer directly.
+- Do not repeat the same tool call with the same arguments if you already have the result.
+- Once you know the answer, output it immediately without any further tool calls.
 """
 
 [[models]]

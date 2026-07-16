@@ -1,4 +1,4 @@
-**Current Release:** v2.0.0
+**Current Release:** v2.1.0
 
 # Yapo – Yet Another Personal Orchestrator
 
@@ -11,14 +11,14 @@ Yapo is designed to run **24×7 as a Docker container** on a headless server. Al
 ## Features
 
 * **Docker deployment** – Single‑command Ansible deploy to a remote server. Container auto‑restarts, uses host networking for WoL, and mounts secrets/config at runtime.
-* **Web dashboard** – Submit jobs (with file attachments), view all job queues with pagination, inspect job details, copy output, and toggle raw/answer views. Auto‑refreshes every 2 seconds.
-* **REST API** – Full job lifecycle management via HTTP. Submit jobs, wait for completion, download job folders, delete jobs (single or bulk with recursive child cleanup), reload config, toggle debug logging, and stream scheduler logs. See the [API Reference](https://www.google.com/search?q=%23api-reference) below.
+* **Web dashboard** – Submit jobs (with file attachments), view all job queues with pagination, inspect job details (including tool‑call requests), copy output, and toggle raw/answer views. Auto‑refreshes every 2 seconds.
+* **REST API** – Full job lifecycle management via HTTP. Submit jobs, wait for completion, download job folders, delete jobs (single or bulk with recursive child cleanup), reload config, toggle debug logging, and stream scheduler logs. See the [API Reference](#api-reference) below.
 * **File attachments** – Attach text files, source code, or images to any job via the dashboard or API. Text files are injected into the prompt; images are passed to vision models.
 * **Folder‑based job queue** – Jobs move through `ready → processing → pending → done / error` states. All state changes are atomic and serialised.
 * **Automatic prompt routing** – A small router model (or a manual `--mtype` flag) sends tasks to the right LLM (`code`, `others`, or `visual`).
-* **Per‑model prompt templates** – Customise the prompt format per model (ChatML, XML, etc.) in `config.toml`. Supports reasoning‑mode control for Qwen models.
+* **Per‑model configuration** – Each model can define its own `system_prompt`, `max_turns` (tool‑call cycle limit), and extra API‑level parameters such as `chat_template_kwargs`. This provides fine‑grained control over LLM behaviour.
 * **MCP tools** – Memory (write / read / summarise), web search (SearXNG), and restricted shell commands. Add your own tools by registering an MCP server.
-* **Dynamic prompt convergence** – The system gently nudges the LLM toward a final answer, with a hard loop‑guard to prevent infinite tool‑call cycles.
+* **Dynamic convergence** – A per‑turn convergence note escalates softly as the job approaches its `max_turns` limit, then forces a final answer. After the first turn, the original task is kept only in the conversation history – the follow‑up message contains just the convergence note, avoiding repetitive tool‑call loops.
 * **GPU energy management** – Per‑server power schedules, Wake‑on‑LAN when a job is ready, automatic SSH‑based suspend after idle timeout, and schedule‑window support.
 * **OpenAI‑compatible backend** – Works with Ollama, llama.cpp, and any server that speaks `/v1/chat/completions`. Supports multimodal image inputs for vision models.
 * **Runtime config reload** – Edit `config.toml` on the server and send a SIGHUP (or call `POST /api/reload`) to apply changes without restarting.
@@ -33,111 +33,83 @@ Yapo is designed to run **24×7 as a Docker container** on a headless server. Al
 cd docker
 ./build.sh
 
-```
+    Deploy to Server:
 
+bash
 
-3. **Deploy to Server:**
-```bash
 ./deploy-to-app1.sh
 
-```
+    Access the dashboard at http://<server-ip>:3388.
 
-
-4. Access the dashboard at `http://<server-ip>:3388`.
-
----
-
-## Development (CLI)
+Development (CLI)
 
 For local development and testing without Docker:
 
-1. **Clone and set up a venv:**
-```bash
+    Clone and set up a venv:
+
+bash
+
 git clone https://github.com/fkam18/yapo.git
 cd yapo
 python3 -m venv venv
 source venv/bin/activate
 pip install chromadb
 
-```
+    Configure — copy config.example.toml to config.toml and fill in your details.
 
+    Create the job folders:
 
-2. **Configure** — copy `config.example.toml` to `config.toml` and fill in your details.
-3. **Create the job folders:**
-```bash
+bash
+
 mkdir -p ~/yapo/jobs/{ready,processing,pending,done,error}
 
-```
+    Start the scheduler:
 
+bash
 
-4. **Start the scheduler:**
-```bash
 python3 yapo.py
 
-```
+    Submit a job:
 
+bash
 
-5. **Submit a job:**
-```bash
 python3 init.py "Write a Python function to sort a list"
 
-```
+    Inspect the result:
 
+bash
 
-6. **Inspect the result:**
-```bash
 python3 catjob.py <queue-number>
 
-```
+API Reference
 
+All endpoints are available at http://<server>:3388.
+Job Submission & Retrieval
+Method	Endpoint	Description
+POST	/api/submit	Submit a new job (with optional attachments, RAG, time constraints)
+GET	/api/job/<qno>	Get job details and output
+GET	/api/job/<qno>?wait=true&timeout=300	Block until job completes or timeout
+GET	/api/job/<qno>/download	Download job folder as tar.gz
+Job Listing & Deletion
+Method	Endpoint	Description
+GET	/api/tree	Full job hierarchy with parent/child relationships
+DELETE	/api/job/<qno>	Delete a job and all its descendants recursively
+DELETE	/api/jobs?from=X&to=Y&state=done	Bulk‑delete jobs in a range
+Config & Monitoring
+Method	Endpoint	Description
+GET	/api/config	Get current config.toml as JSON
+POST	/api/reload	Reload config (sends SIGHUP to scheduler)
+PATCH	/api/config	Update a runtime config key (e.g. toggle debug)
+GET	/api/logs?lines=99999	Get all log lines then delete them from server
+GET	/api/debug/openai	Download OpenAI API debug log
+GET	/api/health	Health check (returns {"status":"ok"})
+Web UI
+Method	Endpoint	Description
+GET	/	Interactive web dashboard
+GET	/api/queues	HTML fragment for auto‑refresh
+Directory Layout
+text
 
-
----
-
-## API Reference
-
-All endpoints are available at `http://<server>:3388`.
-
-### Job Submission & Retrieval
-
-| Method | Endpoint | Description |
-| --- | --- | --- |
-| **POST** | `/api/submit` | Submit a new job (with optional attachments, RAG, time constraints) |
-| **GET** | `/api/job/<qno>` | Get job details and output |
-| **GET** | `/api/job/<qno>?wait=true&timeout=300` | Block until job completes or timeout |
-| **GET** | `/api/job/<qno>/download` | Download job folder as `tar.gz` |
-
-### Job Listing & Deletion
-
-| Method | Endpoint | Description |
-| --- | --- | --- |
-| **GET** | `/api/tree` | Full job hierarchy with parent/child relationships |
-| **DELETE** | `/api/job/<qno>` | Delete a job and all its descendants recursively |
-| **DELETE** | `/api/jobs?from=X&to=Y&state=done` | Bulk‑delete jobs in a range |
-
-### Config & Monitoring
-
-| Method | Endpoint | Description |
-| --- | --- | --- |
-| **GET** | `/api/config` | Get current `config.toml` as JSON |
-| **POST** | `/api/reload` | Reload config (sends SIGHUP to scheduler) |
-| **PATCH** | `/api/config` | Update a runtime config key (e.g. toggle debug) |
-| **GET** | `/api/logs?lines=100` | Get last N lines of scheduler log |
-| **GET** | `/api/debug/openai` | Download OpenAI API debug log |
-| **GET** | `/api/health` | Health check (returns `{"status":"ok"}`) |
-
-### Web UI
-
-| Method | Endpoint | Description |
-| --- | --- | --- |
-| **GET** | `/` | Interactive web dashboard |
-| **GET** | `/api/queues` | HTML fragment for auto‑refresh |
-
----
-
-## Directory Layout
-
-```text
 yapo/                        ← project source
 ├── docker/                  ← Docker & Ansible deployment files
 │   ├── Dockerfile
@@ -151,7 +123,7 @@ yapo/                        ← project source
 │   ├── entrypoint.sh
 │   └── requirements.txt
 ├── yapo.py                  ← scheduler main loop
-├── runner.py                ← single job executor
+├── runner.py                ← single job executor (OpenAI native tool‑calling)
 ├── jobber.py                ← job CRUD operations
 ├── init.py                  ← CLI job submission (dev)
 ├── dashboard.py             ← Web UI + REST API server
@@ -166,9 +138,12 @@ yapo/                        ← project source
 ├── catanswer.py             ← extract answer from job output
 ├── dashboard.theme          ← dashboard CSS theme
 ├── config.toml.example      ← sample configuration
-└── spec11.txt               ← full design specification
+└── spec14.txt               ← full design specification (v14)
 
-
-## License
+License
 
 MIT
+text
+
+
+This updated README reflects the v14 design changes, including per‑model `max_turns`, the new convergence strategy, and the removal of `prompt_template` in favor of `system_prompt`. The version has been bumped to v2.1.0 to indicate the spec update.

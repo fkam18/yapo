@@ -3,7 +3,7 @@
 Runner – executes a single job (spec13 – OpenAI structured messages).
 """
 
-import os, sys, json, subprocess, time, re, base64
+import os, sys, json, subprocess, time, re, base64, uuid
 from conn_openai import generate as call_openai
 from jobber import read_job_toml, move_job_folder, JOBS_DIR, acquire_lock, release_lock
 from config import load_config, get_tool, get_server, get_model_for_type, get_yapo_root
@@ -171,7 +171,7 @@ def inject_attachments_into_message(job_folder, base_content):
         return full_text
 
 
-def build_payload(job, config, turn_number=0):
+def build_payload(job, config, turn_number=0, max_turns=5):
     """
     Build an OpenAI-compatible payload (spec13) for a main job.
     Returns (messages, user_message_content, tools, options_dict).
@@ -239,15 +239,19 @@ def build_payload(job, config, turn_number=0):
     else:
         task = job.get('prompt', '')
 
-    # Convergence note
-    if turn_number <= 2:
+    # Convergence note – now scaled by max_turns
+    if turn_number < max_turns - 1:
         convergence_note = "If the task is a straightforward coding or writing request that you can complete with your own knowledge, do it immediately without calling any tool."
-    elif turn_number == 3:
+    elif turn_number == max_turns - 1:
         convergence_note = "You have called tools several times. You MUST now provide the final answer using the information you have. Do NOT call any more tools."
     else:
         convergence_note = "This is your LAST chance. Produce the final answer NOW. Do NOT call any tools."
 
-    user_message_content = task + "\n\n" + convergence_note
+    if turn_number == 0:
+        user_message_content = task + "\n\n" + convergence_note
+    else:
+        user_message_content = convergence_note
+
     # Inject attachments into user message
     user_message_content = inject_attachments_into_message(job_folder, user_message_content)
 
@@ -369,23 +373,19 @@ def main():
             json.dump(job, f)
         print(f"Job {qno} routed to type={model_type}", file=sys.stderr)
 
-    # Determine turn number (from conversation.json count of tool results)
-    conv_path = os.path.join(job_folder, 'conversation.json')
-    conversation = []
-    if os.path.exists(conv_path):
-        with open(conv_path) as f:
-            conversation = json.load(f)
-    turn_number = sum(1 for msg in conversation if msg['role'] == 'tool')
-
-    # Build payload
-    messages, user_msg_content, tools, options = build_payload(job, config, turn_number)
-
-    # Get server and model name
+    # ──── MODEL CONFIG LOOKUP (must happen before payload building) ────
     model_cfg = None
     for m in config.get('models', []):
         if m.get('type') == model_type:
             model_cfg = m
             break
+    if not model_cfg:
+        print(f"Job {qno} failed: model type '{model_type}' not found in config", file=sys.stderr)
+        move_job_folder(qno, 'processing', 'error')
+        sys.exit(1)
+
+    max_turns = model_cfg.get('max_turns', 5)
+
     server_model_name = model_cfg['name']
     server_name = model_cfg['server']
     server = get_server(server_name)
@@ -393,6 +393,17 @@ def main():
         print(f"Job {qno} failed: server {server_name} not found", file=sys.stderr)
         move_job_folder(qno, 'processing', 'error')
         sys.exit(1)
+
+    # ──── DETERMINE TURN NUMBER ────
+    conv_path = os.path.join(job_folder, 'conversation.json')
+    conversation = []
+    if os.path.exists(conv_path):
+        with open(conv_path) as f:
+            conversation = json.load(f)
+    turn_number = sum(1 for msg in conversation if msg['role'] == 'tool')
+
+    # ──── BUILD PAYLOAD ────
+    messages, user_msg_content, tools, options = build_payload(job, config, turn_number, max_turns)
 
     # Compaction check (when no sub‑jobs and conversation.json is large)
     sub_files = [f for f in os.listdir(job_folder) if f.startswith('sub.')]
@@ -416,7 +427,6 @@ def main():
                 new_qno = subprocess.check_output([sys.executable, 'jobber.py', 'create', '--type', 'main', '--state', 'ready', '--model-type', model_type, '--parent', str(job.get('parent', 0)), '--prompt-file', os.path.join(job_folder, 'prompt.txt')])
                 new_qno = int(new_qno.strip())
                 clone_folder = os.path.join(JOBS_DIR, 'ready', str(new_qno))
-                # Fresh conversation with system message and memory
                 init_conv = [{"role": "system", "content": model_cfg.get('system_prompt', '')},
                              {"role": "user", "content": f"[Compacted memory]\n{memory}"}]
                 with open(os.path.join(clone_folder, 'conversation.json'), 'w') as f:
@@ -456,6 +466,37 @@ def main():
         with open(os.path.join(job_folder, 'output.txt'), 'w') as f:
             json.dump(assistant_message, f, indent=2)
 
+        # ── spec13: handle both native tool_calls and text‑based tool calls ──
+        native_tool_calls = assistant_message.get('tool_calls', [])
+        if not native_tool_calls:
+            # Fallback: try to parse the content as a legacy JSON tool call
+            content = assistant_message.get('content', '')
+            if content and content.strip():
+                try:
+                    cleaned = content.strip()
+                    if cleaned.startswith('```'):
+                        first_nl = cleaned.find('\n')
+                        if first_nl != -1:
+                            cleaned = cleaned[first_nl+1:]
+                        if cleaned.endswith('```'):
+                            cleaned = cleaned[:-3].strip()
+                    parsed = json.loads(cleaned)
+                    if 'tool' in parsed and 'arguments' in parsed:
+                        call_id = 'call_' + uuid.uuid4().hex[:12]
+                        native_tool_calls = [{
+                            'id': call_id,
+                            'type': 'function',
+                            'function': {
+                                'name': parsed['tool'],
+                                'arguments': json.dumps(parsed['arguments'])
+                            }
+                        }]
+                        # Rewrite assistant message to include tool_calls
+                        assistant_message['tool_calls'] = native_tool_calls
+                        assistant_message['content'] = None
+                except (json.JSONDecodeError, ValueError):
+                    pass  # not a JSON tool call, treat as normal content
+
         # Update conversation history
         # 1. Append the user message we just sent
         conversation.append({"role": "user", "content": user_msg_content})
@@ -465,13 +506,10 @@ def main():
             json.dump(conversation, f, indent=2)
 
         # Handle tool calls
-        if 'tool_calls' in assistant_message and assistant_message['tool_calls']:
-            tool_calls = assistant_message['tool_calls']
-            # Check tool call history limit
+        if native_tool_calls:
             tool_msg_count = sum(1 for msg in conversation if msg['role'] == 'tool')
-            if tool_msg_count >= 5:
-                print(f"Job {qno} forced done after {tool_msg_count} tool calls", file=sys.stderr)
-                # Create a final done message and move to done
+            if tool_msg_count >= max_turns:
+                print(f"Job {qno} forced done after {tool_msg_count} tool turns (limit {max_turns})", file=sys.stderr)
                 conversation.append({"role": "assistant", "content": "Task completed. See context for details."})
                 with open(conv_path, 'w') as f:
                     json.dump(conversation, f)
@@ -482,8 +520,8 @@ def main():
                 sys.exit(0)
 
             # Create tool children for each tool call
-            for tc in tool_calls:
-                tool_json_str = json.dumps(tc)  # entire object with id, type, function
+            for tc in native_tool_calls:
+                tool_json_str = json.dumps(tc)
                 child_qno = subprocess.check_output([
                     sys.executable, 'jobber.py', 'create',
                     '--type', 'tool',
@@ -492,11 +530,10 @@ def main():
                     '--tool-name', tc['function']['name'],
                     '--tool-json', tool_json_str
                 ]).decode().strip()
-                # Create sub marker
                 with open(os.path.join(job_folder, f'sub.{child_qno}'), 'w') as f:
                     pass
             move_job_folder(qno, 'processing', 'pending')
-            print(f"Job {qno} pending – created {len(tool_calls)} tool child(ren)", file=sys.stderr)
+            print(f"Job {qno} pending – created {len(native_tool_calls)} tool child(ren)", file=sys.stderr)
         else:
             # No tool calls – done
             move_job_folder(qno, 'processing', 'done')
