@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-Runner – executes a single job.
+Runner – executes a single job (spec13 – OpenAI structured messages).
 """
 
 import os, sys, json, subprocess, time, re, base64
 from conn_openai import generate as call_openai
 from jobber import read_job_toml, move_job_folder, JOBS_DIR, acquire_lock, release_lock
 from config import load_config, get_tool, get_server, get_model_for_type, get_yapo_root
+from json_repair import repair_json
 
 YAPO_ROOT = get_yapo_root()
 JOBS_DIR = os.path.join(YAPO_ROOT, 'jobs')
 TOOL_CACHE = os.path.join(YAPO_ROOT, '.tool_cache.json')
 
 # ---------- LLM / MCP helpers ----------
-def call_backend(server, model, prompt, options, image_data=None):
-    return call_openai(server, model, prompt, options, image_data)
+def call_backend(server, model, messages, options, tools=None, image_data=None):
+    """Wrapper that passes tools array to the OpenAI connector."""
+    return call_openai(server, model, messages, options, tools, image_data)
 
 def call_mcp_tool(tool, arguments):
     mcp_server_name = tool['mcp_server']
@@ -119,16 +121,11 @@ def collect_image_data(job_folder):
     return images
 
 
-def inject_attachments(job_folder, context_text):
-    """
-    Read attachments from the job's assets/ folder and inject them into
-    the context text. Text files are wrapped in <FILE> blocks. Images are
-    noted as available for the model.
-    Returns the modified context string.
-    """
+def inject_attachments_into_message(job_folder, base_content):
+    """Return a user message content (string or multimodal array) with attachments."""
     assets_dir = os.path.join(job_folder, 'assets')
     if not os.path.isdir(assets_dir):
-        return context_text
+        return base_content
 
     text_extensions = {'.py', '.sh', '.txt', '.md', '.rs', '.js', '.ts', '.c', '.cpp',
                        '.h', '.java', '.go', '.rb', '.php', '.swift', '.kt', '.scala',
@@ -136,67 +133,113 @@ def inject_attachments(job_folder, context_text):
                        '.ini', '.cfg', '.env', '.css', '.html', '.sql', '.r', '.m', '.mm'}
     image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'}
 
-    injected = ""
+    text_parts = []
+    image_parts = []
+    has_assets = False
     for filename in sorted(os.listdir(assets_dir)):
         filepath = os.path.join(assets_dir, filename)
         ext = os.path.splitext(filename)[1].lower()
-        
         if ext in text_extensions:
             try:
                 with open(filepath, 'r', errors='replace') as f:
                     content = f.read()
-                injected += f'\n<FILE path="{filename}">\n{content}\n</FILE>\n'
+                text_parts.append(f'<FILE path="{filename}">\n{content}\n</FILE>')
+                has_assets = True
             except Exception:
-                injected += f'\n<FILE path="{filename}">\n[Binary or unreadable file]\n</FILE>\n'
+                text_parts.append(f'<FILE path="{filename}">\n[Binary or unreadable file]</FILE>')
+                has_assets = True
         elif ext in image_extensions:
-            injected += f'\n<IMAGE path="{filename}">Image attached, available for analysis.</IMAGE>\n'
+            with open(filepath, 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode('utf-8')
+            mime = 'image/jpeg' if ext in ('.jpg', '.jpeg') else f'image/{ext[1:]}'
+            image_parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+            has_assets = True
         else:
             size = os.path.getsize(filepath)
-            injected += f'\n<FILE path="{filename}">File attached ({size} bytes, type: {ext})</FILE>\n'
+            text_parts.append(f'<FILE path="{filename}">File attached ({size} bytes, type: {ext})</FILE>')
+            has_assets = True
 
-    if injected:
-        return context_text + "\n\nAttachments:\n" + injected
-    return context_text
+    if not has_assets:
+        return base_content
+
+    full_text = base_content + "\n\nAttachments:\n" + "\n".join(text_parts)
+    if image_parts:
+        multimodal = [{"type": "text", "text": full_text}]
+        multimodal.extend(image_parts)
+        return multimodal
+    else:
+        return full_text
 
 
-def build_prompt(job, config, turn_number=0):
-    """Assemble the final prompt for main jobs, with dynamic convergence rules."""
-    goal = job.get('prompt', '')
-    context = ''
-    ctx_path = os.path.join(JOBS_DIR, 'processing', str(job['qno']), 'context.txt')
-    if os.path.exists(ctx_path):
-        with open(ctx_path) as f:
-            context = f.read()
+def build_payload(job, config, turn_number=0):
+    """
+    Build an OpenAI-compatible payload (spec13) for a main job.
+    Returns (messages, user_message_content, tools, options_dict).
+    """
+    qno = job['qno']
+    job_folder = os.path.join(JOBS_DIR, 'processing', str(qno))
 
-    # Inject attachments into the context
-    context = inject_attachments(os.path.join(JOBS_DIR, 'processing', str(job['qno'])), context)
-
-    # Look up model config by type (not name)
+    # Load model config
     model_type = job.get('model_type', '')
     model_cfg = None
     for m in config.get('models', []):
         if m.get('type') == model_type:
             model_cfg = m
             break
+    if not model_cfg:
+        raise Exception(f"Model type '{model_type}' not found in config")
 
-    # Build tool list string
-    tool_list_str = ''
-    if model_cfg and model_cfg.get('tool_allowed', False):
+    system_prompt = model_cfg.get('system_prompt', 'You are a helpful assistant.')
+    tool_allowed = model_cfg.get('tool_allowed', False)
+
+    # Build tool definitions
+    tools = None
+    if tool_allowed:
+        tools = []
         for tool in config.get('tools', []):
             if tool['name'] == 'route_prompt':
                 continue
-            tool_list_str += f"- {tool['name']}("
             params = tool.get('parameters', [])
-            param_strs = []
+            properties = {}
+            required = []
             for p in params:
-                req = 'required' if p.get('required', False) else 'optional'
-                param_strs.append(f"{p['name']}: {p['type']} ({req})")
-            tool_list_str += ', '.join(param_strs)
-            tool_list_str += f"): {tool['description']}\n"
-    else:
-        tool_list_str = "(none)"
+                properties[p['name']] = {"type": p.get('type', 'string'), "description": p.get('description', '')}
+                if p.get('required', False):
+                    required.append(p['name'])
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": tool['name'],
+                    "description": tool.get('description', ''),
+                    "parameters": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": required
+                    }
+                }
+            })
 
-    # Dynamic convergence instruction
+    # Load conversation history
+    conv_path = os.path.join(job_folder, 'conversation.json')
+    if os.path.exists(conv_path):
+        with open(conv_path) as f:
+            conversation = json.load(f)
+    else:
+        conversation = []
+
+    # Build messages array
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(conversation)
+
+    # Current user task
+    prompt_path = os.path.join(job_folder, 'prompt.txt')
+    if os.path.exists(prompt_path):
+        with open(prompt_path) as f:
+            task = f.read().strip()
+    else:
+        task = job.get('prompt', '')
+
+    # Convergence note
     if turn_number <= 2:
         convergence_note = "If the task is a straightforward coding or writing request that you can complete with your own knowledge, do it immediately without calling any tool."
     elif turn_number == 3:
@@ -204,97 +247,34 @@ def build_prompt(job, config, turn_number=0):
     else:
         convergence_note = "This is your LAST chance. Produce the final answer NOW. Do NOT call any tools."
 
-    # Check if the model has a custom prompt template
-    custom_template = model_cfg.get('prompt_template', '') if model_cfg else ''
+    user_message_content = task + "\n\n" + convergence_note
+    # Inject attachments into user message
+    user_message_content = inject_attachments_into_message(job_folder, user_message_content)
 
-    if custom_template:
-        prompt = custom_template.replace('{{goal}}', goal)
-        prompt = prompt.replace('{{context}}', context or '(none)')
-        prompt = prompt.replace('{{tool_list}}', tool_list_str)
-        prompt = prompt.replace('{{task}}', job.get('prompt', ''))
-        prompt = prompt.replace('{{convergence_note}}', convergence_note)
-        return prompt
+    # Build options dict from model config
+    options = {}
+    for key in ['temperature', 'max_tokens', 'top_k', 'top_p', 'min_p', 
+                'repeat_penalty', 'repeat_last_n', 'presence_penalty', 'frequency_penalty',
+                'seed', 'stop', 'chat_template_kwargs']:
+        if key in model_cfg:
+            options[key] = model_cfg[key]
 
-    # Fallback: default XML template
-    template = f"""<GOAL>
-{goal}
-</GOAL>
-
-<CONTEXT>
-{context}
-</CONTEXT>
-
-<TOOLS>
-{tool_list_str}
-</TOOLS>
-
-<RULES>
-Your ENTIRE response must be EXACTLY ONE of the following JSON objects.
-Do NOT add any text, markdown fences, or comments.
-
-- If you need information, use a tool:  
-  {{
-    "tool": "tool_name",
-    "arguments": {{ "param1": "value1" }}
-  }}
-
-- Once you have the information (or if you already have enough), you MUST provide the final answer:  
-  {{
-    "done": true,
-    "answer": "Your final answer (any text, code, or Markdown)."
-  }}
-
-IMPORTANT:
-1. {convergence_note}
-2. The run_command tool does NOT support shell operators like &&, >, |, etc. Use single commands only.
-3. If the context already contains search results, do NOT call web_search again. Use those results to answer immediately.
-4. Do NOT attempt to execute or test the code; just provide it.
-Never output both formats. The "answer" field may contain multiple lines.
-</RULES>
-
-<TASK>
-{job.get('prompt', '')}
-</TASK>
-"""
-    return template
+    return messages, user_message_content, tools, options
 
 
-def propagate_tool_result(tool_qno, parent_qno, tool_name=''):
-    lf = acquire_lock()
-    try:
-        tool_folder = os.path.join(JOBS_DIR, 'processing', str(tool_qno))
-        output_path = os.path.join(tool_folder, 'output.txt')
-        if not os.path.exists(output_path):
-            raise Exception(f"Tool output not found: {output_path}")
-        with open(output_path) as f:
-            tool_output = f.read()
-
-        for pst in ['ready', 'processing', 'pending']:
-            parent_folder = os.path.join(JOBS_DIR, pst, str(parent_qno))
-            if os.path.exists(parent_folder):
-                ctx_path = os.path.join(parent_folder, 'context.txt')
-                with open(ctx_path, 'a') as apf:
-                    apf.write(f"\n[TOOL:{tool_name}]\n{tool_output}\n")
-                sub_file = os.path.join(parent_folder, f'sub.{tool_qno}')
-                if os.path.exists(sub_file):
-                    os.remove(sub_file)
-                remaining = [f for f in os.listdir(parent_folder) if f.startswith('sub.')]
-                if not remaining:
-                    move_job_folder(parent_qno, pst, 'ready')
-                    print(f"Job {parent_qno} ready again (tool {tool_qno} finished)", file=sys.stderr)
-                break
-    finally:
-        release_lock(lf)
-
-
-def extract_json(text: str):
+def extract_json_from_content(text: str):
+    """Legacy JSON extraction for done/tool parsing (not used for tool calls in spec13)."""
     text = text.strip()
     text = re.sub(r'\n?```\s*$', '', text)
     text = re.sub(r'^```[a-z]*\s*\n', '', text)
     try:
         return json.loads(text), text
     except json.JSONDecodeError:
-        pass
+        try:
+            repaired = repair_json(text)
+            return json.loads(repaired), repaired
+        except Exception:
+            pass
     start = text.find('{')
     if start == -1:
         raise ValueError("No JSON object found")
@@ -327,21 +307,15 @@ def main():
     with open(os.path.join(job_folder, 'job.toml')) as f:
         job = json.load(f)
     job['qno'] = qno
-    prompt_path = os.path.join(job_folder, 'prompt.txt')
-    if os.path.exists(prompt_path):
-        with open(prompt_path) as f:
-            job['prompt'] = f.read().strip()
-    else:
-        job['prompt'] = ''
 
     # ----- tool job -----
     if job['type'] == 'tool':
         print(f"Job {qno} (tool) started: {job.get('tool_name','')}", file=sys.stderr)
         tool_call_path = os.path.join(job_folder, 'tool_call.json')
         with open(tool_call_path) as f:
-            tool_req = json.load(f)
-        tool_name = tool_req['tool']
-        arguments = tool_req['arguments']
+            tool_call_obj = json.load(f)
+        tool_name = tool_call_obj['function']['name']
+        arguments = json.loads(tool_call_obj['function']['arguments'])
         tool = get_tool(tool_name)
         if not tool:
             print(f"Job {qno} failed: tool {tool_name} not found", file=sys.stderr)
@@ -353,7 +327,7 @@ def main():
                 f.write(result)
             parent = job.get('parent', 0)
             if parent:
-                propagate_tool_result(qno, parent, tool_name)
+                propagate_tool_result(qno, parent, tool_name, tool_call_obj['id'])
             move_job_folder(qno, 'processing', 'done')
             print(f"Job {qno} completed", file=sys.stderr)
         except Exception as e:
@@ -362,9 +336,9 @@ def main():
         sys.exit(0)
 
     # ----- main job -----
-    print(f"Job {qno} (main) started: {job['prompt'][:60]}", file=sys.stderr)
+    print(f"Job {qno} (main) started: {job.get('prompt','')[:60]}", file=sys.stderr)
 
-    # Resolve model_type → model_cfg (server name, template, options)
+    # Routing if needed
     model_type = job.get('model_type', '')
     if not model_type:
         print(f"Job {qno} routing...", file=sys.stderr)
@@ -374,11 +348,15 @@ def main():
             move_job_folder(qno, 'processing', 'error')
             sys.exit(1)
         try:
-            route_result = call_mcp_tool(route_tool, {"prompt": job['prompt']})
-            model_type = route_result.strip().lower()
-            if model_type in ['code', 'others', 'visual']:
-                pass
+            prompt_path = os.path.join(job_folder, 'prompt.txt')
+            if os.path.exists(prompt_path):
+                with open(prompt_path) as f:
+                    prompt_text = f.read().strip()
             else:
+                prompt_text = job.get('prompt', '')
+            route_result = call_mcp_tool(route_tool, {"prompt": prompt_text})
+            model_type = route_result.strip().lower()
+            if model_type not in ['code', 'others', 'visual']:
                 print(f"Job {qno} failed: router returned invalid classification '{model_type}'", file=sys.stderr)
                 move_job_folder(qno, 'processing', 'error')
                 sys.exit(1)
@@ -391,17 +369,23 @@ def main():
             json.dump(job, f)
         print(f"Job {qno} routed to type={model_type}", file=sys.stderr)
 
-    # Look up model config by type
+    # Determine turn number (from conversation.json count of tool results)
+    conv_path = os.path.join(job_folder, 'conversation.json')
+    conversation = []
+    if os.path.exists(conv_path):
+        with open(conv_path) as f:
+            conversation = json.load(f)
+    turn_number = sum(1 for msg in conversation if msg['role'] == 'tool')
+
+    # Build payload
+    messages, user_msg_content, tools, options = build_payload(job, config, turn_number)
+
+    # Get server and model name
     model_cfg = None
     for m in config.get('models', []):
         if m.get('type') == model_type:
             model_cfg = m
             break
-    if not model_cfg:
-        print(f"Job {qno} failed: model type '{model_type}' not found in config", file=sys.stderr)
-        move_job_folder(qno, 'processing', 'error')
-        sys.exit(1)
-
     server_model_name = model_cfg['name']
     server_name = model_cfg['server']
     server = get_server(server_name)
@@ -410,14 +394,17 @@ def main():
         move_job_folder(qno, 'processing', 'error')
         sys.exit(1)
 
-    # compaction check (only when no sub jobs)
+    # Compaction check (when no sub‑jobs and conversation.json is large)
     sub_files = [f for f in os.listdir(job_folder) if f.startswith('sub.')]
     if not sub_files:
-        ctx_path = os.path.join(job_folder, 'context.txt')
-        if os.path.exists(ctx_path) and os.path.getsize(ctx_path) > config.get('compact_size_kb', 50) * 1024:
+        conv_size = os.path.getsize(conv_path) if os.path.exists(conv_path) else 0
+        if conv_size > config.get('compact_size_kb', 50) * 1024:
             print(f"Job {qno} compacting context...", file=sys.stderr)
-            with open(ctx_path) as f:
-                context_text = f.read()
+            text_parts = []
+            for msg in conversation:
+                if msg['role'] in ('user', 'assistant') and msg.get('content'):
+                    text_parts.append(msg['content'])
+            context_text = "\n".join(text_parts)
             summarise_tool = get_tool('summarise_text')
             mem_write_tool = get_tool('mem_write')
             mem_read_tool = get_tool('mem_read')
@@ -426,100 +413,159 @@ def main():
                 job_id = job.get('job_id', '')
                 call_mcp_tool(mem_write_tool, {"text": f"{job_id}: {summary}"})
                 memory = call_mcp_tool(mem_read_tool, {"query": job_id})
-                new_qno = subprocess.check_output([sys.executable, 'jobber.py', 'create', '--type', 'main', '--state', 'ready', '--model-type', model_type, '--parent', str(job.get('parent', 0)), '--prompt-file', prompt_path])
+                new_qno = subprocess.check_output([sys.executable, 'jobber.py', 'create', '--type', 'main', '--state', 'ready', '--model-type', model_type, '--parent', str(job.get('parent', 0)), '--prompt-file', os.path.join(job_folder, 'prompt.txt')])
                 new_qno = int(new_qno.strip())
                 clone_folder = os.path.join(JOBS_DIR, 'ready', str(new_qno))
-                with open(os.path.join(clone_folder, 'context.txt'), 'w') as f:
-                    f.write(memory)
+                # Fresh conversation with system message and memory
+                init_conv = [{"role": "system", "content": model_cfg.get('system_prompt', '')},
+                             {"role": "user", "content": f"[Compacted memory]\n{memory}"}]
+                with open(os.path.join(clone_folder, 'conversation.json'), 'w') as f:
+                    json.dump(init_conv, f)
                 move_job_folder(qno, 'processing', 'done')
                 print(f"Job {qno} compacted to job {new_qno}", file=sys.stderr)
                 sys.exit(0)
 
-    # Determine current turn number
-    turn_number = 0
-    ctx_path = os.path.join(job_folder, 'context.txt')
-    if os.path.exists(ctx_path):
-        with open(ctx_path) as f:
-            turn_number = len([line for line in f if line.startswith('[TOOL:')])
+    # Add current user message to messages array for sending
+    messages.append({"role": "user", "content": user_msg_content})
 
-    # Collect images for multimodal models
+    # Save payload for debugging
+    full_payload = {
+        "model": server_model_name,
+        "messages": messages,
+        "temperature": options.get('temperature', 0.0),
+        "max_tokens": options.get('max_tokens', 4096),
+        "stream": False
+    }
+    if tools:
+        full_payload["tools"] = tools
+    for k in ['top_k', 'top_p', 'min_p', 'repeat_penalty', 'repeat_last_n', 'presence_penalty', 'frequency_penalty', 'seed', 'stop', 'chat_template_kwargs']:
+        if k in options:
+            full_payload[k] = options[k]
+    with open(os.path.join(job_folder, 'full_payload.json'), 'w') as f:
+        json.dump(full_payload, f, indent=2)
+
+    # Collect images (for multimodal models)
     image_data = collect_image_data(job_folder)
 
     print(f"Job {qno} calling LLM {server_model_name} on {server_name}...", file=sys.stderr)
-    prompt = build_prompt(job, config, turn_number)
-    with open(os.path.join(job_folder, 'full_prompt.txt'), 'w') as f:
-        f.write(prompt)
-    options = {
-        "temperature": model_cfg.get('temperature', 0.0),
-        "num_predict": model_cfg.get('max_tokens', 4096),
-    }
-    if 'repeat_penalty' in model_cfg:
-        options['repeat_penalty'] = model_cfg['repeat_penalty']
-    if 'repeat_last_n' in model_cfg:
-        options['repeat_last_n'] = model_cfg['repeat_last_n']
-    if 'stop' in model_cfg:
-        options['stop'] = model_cfg['stop']
-
     try:
-        response = call_backend(server, server_model_name, prompt, options, image_data if image_data else None)
+        # Call backend – returns the full assistant message object (with possible tool_calls)
+        assistant_message = call_backend(server, server_model_name, messages, options, tools, image_data if image_data else None)
+
+        # Save raw assistant message to output.txt (for debugging)
         with open(os.path.join(job_folder, 'output.txt'), 'w') as f:
-            f.write(response)
+            json.dump(assistant_message, f, indent=2)
 
-        try:
-            output_json, cleaned_text = extract_json(response)
-        except ValueError as e:
-            print(f"Job {qno} failed: invalid JSON output - {e}", file=sys.stderr)
-            move_job_folder(qno, 'processing', 'error')
-            sys.exit(1)
+        # Update conversation history
+        # 1. Append the user message we just sent
+        conversation.append({"role": "user", "content": user_msg_content})
+        # 2. Append assistant message
+        conversation.append(assistant_message)
+        with open(conv_path, 'w') as f:
+            json.dump(conversation, f, indent=2)
 
-        with open(os.path.join(job_folder, 'output.txt'), 'w') as f:
-            f.write(cleaned_text)
-
-        if 'tool' in output_json:
-            tool_name = output_json['tool']
-            arguments = output_json['arguments']
-
-            tool_call_history = []
-            ctx_path = os.path.join(job_folder, 'context.txt')
-            if os.path.exists(ctx_path):
-                with open(ctx_path) as f:
-                    tool_call_history = [line for line in f if line.startswith('[TOOL:')]
-            if len(tool_call_history) >= 5:
-                print(f"Job {qno} forced done after {len(tool_call_history)} tool calls", file=sys.stderr)
-                output_json = {"done": True, "answer": "Task completed. See context for details."}
-                with open(os.path.join(job_folder, 'output.txt'), 'w') as f:
-                    f.write(json.dumps(output_json))
+        # Handle tool calls
+        if 'tool_calls' in assistant_message and assistant_message['tool_calls']:
+            tool_calls = assistant_message['tool_calls']
+            # Check tool call history limit
+            tool_msg_count = sum(1 for msg in conversation if msg['role'] == 'tool')
+            if tool_msg_count >= 5:
+                print(f"Job {qno} forced done after {tool_msg_count} tool calls", file=sys.stderr)
+                # Create a final done message and move to done
+                conversation.append({"role": "assistant", "content": "Task completed. See context for details."})
+                with open(conv_path, 'w') as f:
+                    json.dump(conversation, f)
                 move_job_folder(qno, 'processing', 'done')
                 parent = job.get('parent', 0)
                 if parent:
                     subprocess.run([sys.executable, 'jobber.py', 'cleanup', str(parent)])
                 sys.exit(0)
 
-            tool_json_str = json.dumps({"tool": tool_name, "arguments": arguments})
-            child_qno = subprocess.check_output([
-                sys.executable, 'jobber.py', 'create',
-                '--type', 'tool',
-                '--state', 'ready',
-                '--parent', str(qno),
-                '--tool-name', tool_name,
-                '--tool-json', tool_json_str
-            ]).decode().strip()
-            with open(os.path.join(job_folder, f'sub.{child_qno}'), 'w') as f:
-                pass
+            # Create tool children for each tool call
+            for tc in tool_calls:
+                tool_json_str = json.dumps(tc)  # entire object with id, type, function
+                child_qno = subprocess.check_output([
+                    sys.executable, 'jobber.py', 'create',
+                    '--type', 'tool',
+                    '--state', 'ready',
+                    '--parent', str(qno),
+                    '--tool-name', tc['function']['name'],
+                    '--tool-json', tool_json_str
+                ]).decode().strip()
+                # Create sub marker
+                with open(os.path.join(job_folder, f'sub.{child_qno}'), 'w') as f:
+                    pass
             move_job_folder(qno, 'processing', 'pending')
-            print(f"Job {qno} pending – created tool child {child_qno} ({tool_name})", file=sys.stderr)
-        elif 'done' in output_json:
+            print(f"Job {qno} pending – created {len(tool_calls)} tool child(ren)", file=sys.stderr)
+        else:
+            # No tool calls – done
             move_job_folder(qno, 'processing', 'done')
             print(f"Job {qno} completed", file=sys.stderr)
             parent = job.get('parent', 0)
             if parent:
                 subprocess.run([sys.executable, 'jobber.py', 'cleanup', str(parent)])
-        else:
-            print(f"Job {qno} failed: JSON without done/tool key", file=sys.stderr)
-            move_job_folder(qno, 'processing', 'error')
+
     except Exception as e:
         print(f"Job {qno} failed: {e}", file=sys.stderr)
         move_job_folder(qno, 'processing', 'error')
+
+
+def propagate_tool_result(tool_qno, parent_qno, tool_name, call_id):
+    """Append the tool result message to the parent's conversation.json and re-enable it."""
+    lf = acquire_lock()
+    try:
+        tool_folder = os.path.join(JOBS_DIR, 'processing', str(tool_qno))
+        output_path = os.path.join(tool_folder, 'output.txt')
+        if not os.path.exists(output_path):
+            raise Exception(f"Tool output not found: {output_path}")
+        with open(output_path) as f:
+            tool_output = f.read().strip()
+
+        # Find parent job (could be in ready, processing, or pending)
+        parent_folder = None
+        for pst in ['ready', 'processing', 'pending']:
+            candidate = os.path.join(JOBS_DIR, pst, str(parent_qno))
+            if os.path.exists(candidate):
+                parent_folder = candidate
+                break
+        if not parent_folder:
+            print(f"Parent job {parent_qno} not found for tool {tool_qno}", file=sys.stderr)
+            return
+
+        # Append tool result to conversation.json
+        conv_path = os.path.join(parent_folder, 'conversation.json')
+        if os.path.exists(conv_path):
+            with open(conv_path) as f:
+                conv = json.load(f)
+        else:
+            conv = []
+        conv.append({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "name": tool_name,
+            "content": tool_output
+        })
+        with open(conv_path, 'w') as f:
+            json.dump(conv, f, indent=2)
+
+        # Remove sub marker
+        sub_file = os.path.join(parent_folder, f'sub.{tool_qno}')
+        if os.path.exists(sub_file):
+            os.remove(sub_file)
+        # If no more sub files, move parent to ready
+        remaining = [f for f in os.listdir(parent_folder) if f.startswith('sub.')]
+        if not remaining:
+            current_state = None
+            for st in ['pending', 'processing', 'ready']:
+                if os.path.exists(os.path.join(JOBS_DIR, st, str(parent_qno))):
+                    current_state = st
+                    break
+            if current_state:
+                move_job_folder(parent_qno, current_state, 'ready')
+                print(f"Job {parent_qno} ready again (tool {tool_qno} finished)", file=sys.stderr)
+    finally:
+        release_lock(lf)
+
 
 if __name__ == '__main__':
     main()

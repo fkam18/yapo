@@ -4,6 +4,8 @@ services:
     container_name: yapo
     restart: unless-stopped
     network_mode: host
+    dns:
+      - 192.168.0.15
     ports:
       - "3388:3388"
     volumes:

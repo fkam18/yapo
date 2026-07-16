@@ -68,9 +68,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           <label for="job-mtype">Model type</label>
           <select id="job-mtype">
             <option value="">Auto (router)</option>
-            <option value="code">Code</option>
-            <option value="others">Others</option>
-            <option value="visual">Visual</option>
+            <option value="code-qwen3">code-qwen3</option>
+            <option value="code-test">code-test</option>
+            <option value="code">code</option>
+            <option value="code-plan">code-plan</option>
+            <option value="others">others</option>
+            <option value="others-14b">others-14b</option>
+            <option value="visual">visual</option>
           </select>
         </div>
         <div class="form-group">
@@ -152,6 +156,11 @@ var pageNumbers = {};
 var currentRawJson = '';
 var currentDisplayText = '';
 var attachedFiles = [];
+
+// Tool call display state
+var currentToolCallRaw = '';
+var currentToolCallDisplay = '';
+var currentToolCallSummary = '';
 
 function openModal() {
     document.getElementById('job-prompt').value = '';
@@ -289,24 +298,68 @@ function loadJob(qno) {
             if (data.error) {
                 detail.innerHTML = '<h2>Error</h2><p>' + data.error + '</p>';
             } else {
+                // ── Process tool call if present ──
+                if (data.tool_call) {
+                    currentToolCallRaw = JSON.stringify(data.tool_call, null, 2);
+                    var argsObj = {};
+                    try { argsObj = JSON.parse(data.tool_call.function.arguments); } catch(e) {}
+                    var argsStr = JSON.stringify(argsObj, null, 2);
+                    currentToolCallSummary = 'Called tool ' + data.tool_call.function.name + ' with arguments:\n' + argsStr;
+                    currentToolCallDisplay = currentToolCallSummary;
+                } else {
+                    currentToolCallRaw = '';
+                    currentToolCallDisplay = '';
+                    currentToolCallSummary = '';
+                }
+
+                // ── Process output ──
                 var displayOutput = data.output || '';
                 currentRawJson = displayOutput;
                 if (displayOutput) {
                     var cleaned = displayOutput.trim();
-                    if (cleaned.indexOf('```') === 0) {
+                    // Remove markdown fences if present
+                    if (cleaned.startsWith('```')) {
                         var firstNewline = cleaned.indexOf('\n');
                         if (firstNewline !== -1) cleaned = cleaned.substring(firstNewline + 1);
-                        if (cleaned.lastIndexOf('```') === cleaned.length - 3) cleaned = cleaned.substring(0, cleaned.length - 3).trim();
+                        if (cleaned.endsWith('```')) cleaned = cleaned.substring(0, cleaned.length - 3).trim();
                     }
                     try {
                         var parsed = JSON.parse(cleaned);
                         currentRawJson = JSON.stringify(parsed, null, 2);
-                        if (parsed.answer) displayOutput = parsed.answer;
-                        else if (parsed.done) displayOutput = parsed.answer || '[done]';
-                        else if (parsed.tool) displayOutput = 'Tool call: ' + parsed.tool;
-                    } catch(e) {}
+                        // ── spec13: structured message format ──
+                        if (parsed.role === 'assistant') {
+                            if (parsed.content) {
+                                displayOutput = parsed.content;
+                            } else if (parsed.tool_calls) {
+                                var calls = parsed.tool_calls.map(function(tc) {
+                                    return tc.function.name + '(' + tc.function.arguments + ')';
+                                }).join(', ');
+                                displayOutput = 'Tool calls: ' + calls;
+                            } else {
+                                displayOutput = '[assistant message with no content]';
+                            }
+                        } else if (parsed.role === 'tool') {
+                            displayOutput = parsed.content || '[tool result]';
+                        } else if (parsed.role) {
+                            // other roles – just show content if available
+                            displayOutput = parsed.content || JSON.stringify(parsed);
+                        }
+                        // ── fallback for legacy format (answer/done/tool) ──
+                        else if (parsed.answer) {
+                            displayOutput = parsed.answer;
+                        } else if (parsed.done) {
+                            displayOutput = parsed.answer || '[done]';
+                        } else if (parsed.tool) {
+                            displayOutput = 'Tool call: ' + parsed.tool;
+                        }
+                        // else keep displayOutput unchanged (e.g. simple text)
+                    } catch(e) {
+                        // Not JSON – keep as plain text
+                    }
                 }
                 currentDisplayText = displayOutput;
+
+                // ── Build HTML ──
                 var html = '';
                 if (data.name) html += '<h2>' + escapeHtml(data.name) + ' <span style="color:var(--text-muted);font-size:0.8rem;font-weight:400">(#' + qno + ')</span></h2>';
                 else html += '<h2>Job ' + qno + '</h2>';
@@ -319,6 +372,20 @@ function loadJob(qno) {
                 if (data.start_after) html += '<span><b>Start after:</b> ' + data.start_after + '</span>';
                 if (data.max_job_duration) html += '<span><b>Max duration:</b> ' + data.max_job_duration + 's</span>';
                 html += '</div>';
+
+                // ── Tool Call section (if available) ──
+                if (data.tool_call) {
+                    html += '<div style="margin-top:16px">';
+                    html += '<div style="display:flex;align-items:center;gap:10px">';
+                    html += '<h3 style="margin:0">Tool Call</h3>';
+                    html += '<button id="tool-raw-btn" class="raw-toggle" onclick="toggleToolRaw()">Show raw</button>';
+                    html += '<button class="copy-btn" onclick="copyToolCall()">Copy</button>';
+                    html += '</div>';
+                    html += '<pre id="tool-call-block">' + escapeHtml(currentToolCallDisplay) + '</pre>';
+                    html += '</div>';
+                }
+
+                // ── Output section ──
                 if (data.output) {
                     html += '<div style="display:flex;align-items:center;gap:10px;margin-top:16px">';
                     html += '<h3 style="margin:0">Output</h3>';
@@ -341,18 +408,77 @@ function toggleRaw() {
         btn.textContent = 'Show answer'; block.textContent = currentRawJson; currentDisplayText = currentRawJson;
     } else {
         btn.textContent = 'Show raw';
-        try { var parsed = JSON.parse(currentRawJson); var answer = parsed.answer || parsed.tool || currentRawJson; block.textContent = answer; currentDisplayText = answer; }
+        try { var parsed = JSON.parse(currentRawJson);
+            // Extract content if it's a structured message, else show raw
+            var answer = (parsed && parsed.content) ? parsed.content : currentRawJson;
+            if (parsed && parsed.role === 'assistant' && !parsed.content && parsed.tool_calls) {
+                answer = 'Tool calls: ' + parsed.tool_calls.map(function(tc){return tc.function.name;}).join(', ');
+            }
+            block.textContent = answer; currentDisplayText = answer;
+        }
         catch(e) { block.textContent = currentRawJson; currentDisplayText = currentRawJson; }
     }
 }
 
+function toggleToolRaw() {
+    var btn = document.getElementById('tool-raw-btn');
+    var block = document.getElementById('tool-call-block');
+    if (btn.textContent === 'Show raw') {
+        btn.textContent = 'Show summary'; block.textContent = currentToolCallRaw; currentToolCallDisplay = currentToolCallRaw;
+    } else {
+        btn.textContent = 'Show raw'; block.textContent = currentToolCallSummary; currentToolCallDisplay = currentToolCallSummary;
+    }
+}
+
 function copyOutput() {
-    navigator.clipboard.writeText(currentDisplayText).then(function() {
-        var btn = document.querySelector('.copy-btn');
-        var original = btn.textContent;
-        btn.textContent = 'Copied!'; btn.style.background = 'var(--success)'; btn.style.color = '#fff'; btn.style.borderColor = 'var(--success)';
-        setTimeout(function() { btn.textContent = original; btn.style.background = ''; btn.style.color = ''; btn.style.borderColor = ''; }, 1500);
-    });
+    const btn = document.querySelector('#output-block').parentElement.querySelector('.copy-btn');
+    copyText(currentDisplayText, btn);
+}
+function copyToolCall() {
+    const btn = document.querySelector('#tool-call-block').parentElement.querySelector('.copy-btn');
+    copyText(currentToolCallDisplay, btn);
+}
+function copyText(text, btn) {
+    if (!btn) return;
+    const original = btn.textContent;
+    const textSize = text.length;
+    const sizeInMB = (textSize * 2) / (1024 * 1024);
+    if (sizeInMB > 5) {
+        if (!confirm(`Content is large (~${sizeInMB.toFixed(1)} MB). Copying may be slow or fail. Continue?`)) {
+            return;
+        }
+    }
+    try {
+        if (textSize > 1000000) {
+            btn.textContent = 'Preparing...';
+            btn.disabled = true;
+        }
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.cssText = 'position:fixed;opacity:0;left:-9999px;top:-9999px;';
+        document.body.appendChild(textarea);
+        textarea.select();
+        const success = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        if (success) {
+            btn.textContent = 'Copied!';
+            btn.style.background = 'var(--success)';
+            btn.style.color = '#fff';
+            btn.style.borderColor = 'var(--success)';
+        }
+    } catch (err) {
+        btn.textContent = 'Failed!';
+        btn.style.background = 'var(--danger)';
+        btn.style.color = '#fff';
+        btn.style.borderColor = 'var(--danger)';
+    }
+    setTimeout(() => {
+        btn.textContent = original;
+        btn.style.background = '';
+        btn.style.color = '';
+        btn.style.borderColor = '';
+        btn.disabled = false;
+    }, 1500);
 }
 
 function escapeHtml(text) { return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
@@ -541,6 +667,14 @@ def get_job_details(qno):
             if os.path.exists(output_path):
                 with open(output_path) as f:
                     output = f.read()
+
+            # Read tool_call.json if present
+            tool_call = None
+            tool_call_path = os.path.join(job_dir, 'tool_call.json')
+            if os.path.exists(tool_call_path):
+                with open(tool_call_path) as f:
+                    tool_call = json.load(f)
+
             return {
                 'state': state,
                 'name': job.get('name', ''),
@@ -550,7 +684,8 @@ def get_job_details(qno):
                 'tool_name': job.get('tool_name', ''),
                 'start_after': job.get('start_after', ''),
                 'max_job_duration': job.get('max_job_duration', ''),
-                'output': output
+                'output': output,
+                'tool_call': tool_call
             }
     return {'error': 'Job not found'}
 
@@ -601,32 +736,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(result.encode())
 
-        elif path == '/api/debug/openai':
-            log_pipe = os.path.join(YAPO_ROOT, 'log.pipe')
-            try:
-                lines = []
-                fd = os.open(log_pipe, os.O_RDONLY | os.O_NONBLOCK)
-                while True:
-                    try:
-                        data = os.read(fd, 4096)
-                        if not data:
-                            break
-                        lines.extend(data.decode(errors='replace').split('\n'))
-                    except BlockingIOError:
-                        break
-                os.close(fd)
-                openai_lines = [l for l in lines if 'openai ' in l]
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/plain')
-                self.send_header('Content-Disposition', 'attachment; filename="openai_debug.txt"')
-                self.end_headers()
-                self.wfile.write('\n'.join(openai_lines).encode())
-            except FileNotFoundError:
-                self.send_response(404)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps({'error': 'Log not available'}).encode())
-
         elif path == '/api/health':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -650,6 +759,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(result).encode())
+
+        elif path == '/api/mem/read':
+            query = parse_qs(parsed.query)
+            key = query.get('key', [''])[0]
+            delete = query.get('del', ['false'])[0].lower() == 'true'
+            compact = query.get('compact', ['false'])[0].lower() == 'true'
+            top_k = int(query.get('top_k', ['15'])[0])
+            
+            from yapo_mcp import mem_read, mem_delete, mem_compact
+            
+            if compact:
+                mem_compact({})
+            
+            if key:
+                result = mem_read({'query': key, 'top_k': top_k})
+                if delete:
+                    mem_delete({'query': key, 'top_k': top_k})
+            else:
+                result = mem_read({'query': '', 'top_k': top_k})
+                if delete:
+                    mem_delete({'query': '', 'top_k': top_k})
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(result.encode())
 
         elif path == '/api/config':
             self.send_response(200)
@@ -811,6 +946,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': str(e)}).encode())
+
+        elif path == '/api/mem/write':
+            content_length = int(self.headers['Content-Length'])
+            body = self.rfile.read(content_length)
+            data = json.loads(body)
+            text = data.get('text', '')
+            prefix = data.get('prefix', '')
+            
+            from yapo_mcp import mem_write
+            result = mem_write({'text': text, 'prefix': prefix})
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'success': True, 'message': result}).encode())
 
         elif path == '/api/config':
             content_length = int(self.headers['Content-Length'])

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Jobber – serialised CRUD for jobs.
+Jobber – serialised CRUD for jobs (spec13).
 Usage:
   jobber create --type <type> [--state <state>] [--parent <qno>] [--model-type <model type>] [--prompt-file <file>] [--tool-json '<json>'] [--job-name <name>] [--start-after HH:MM] [--max-job-duration <seconds>]
   jobber move <qno> <new_state>
@@ -129,6 +129,11 @@ def create_job(type, state='ready', model_type='', parent=0, prompt_text='',
         if tool_json:
             with open(os.path.join(folder, 'tool_call.json'), 'w') as f:
                 f.write(tool_json)
+
+        # --- spec13: initialise conversation.json for main jobs ---
+        if type == 'main':
+            with open(os.path.join(folder, 'conversation.json'), 'w') as f:
+                json.dump([], f)
 
         # attachments
         if attachments:

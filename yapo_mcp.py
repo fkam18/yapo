@@ -22,6 +22,8 @@ SUMMARISE_SCRIPT = os.path.join(os.path.dirname(__file__), 'summarise.py')
 MEMORY_SCRIPT = os.path.join(os.path.dirname(__file__), 'memory.py')
 ROUTER_MODEL = "qwen2.5:3b"
 
+DEFAULT_TOP_K = 15
+
 def route_prompt(args):
     prompt = args.get('prompt', '')
     import urllib.request, urllib.error
@@ -55,20 +57,47 @@ def route_prompt(args):
         print(f"Router error: {e}", file=sys.stderr)
         return ""
 
+def mem_delete(args):
+    query = args.get('query', '')
+    top_k = int(args.get('top_k', DEFAULT_TOP_K))
+    
+    cmd = [sys.executable, MEMORY_SCRIPT, 'delete']
+    if query:
+        cmd.extend(['--query', query, '--top-k', str(top_k)])
+    else:
+        cmd.append('--read-all')
+    
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    return p.stderr.strip()
+
+def mem_compact(args):
+    """Run memory.py compact to remove duplicates."""
+    p = subprocess.run([sys.executable, MEMORY_SCRIPT, 'compact'], capture_output=True, text=True)
+    return p.stderr.strip()
 
 def mem_write(args):
     text = args.get('text', '')
-    p = subprocess.run([sys.executable, MEMORY_SCRIPT, 'write', '--input', '/dev/stdin'],
-                       input=text, capture_output=True, text=True)
+    prefix = args.get('prefix', '')
+    
+    cmd = [sys.executable, MEMORY_SCRIPT, 'write']
+    if prefix:
+        cmd.extend(['--prefix', prefix])
+    
+    p = subprocess.run(cmd, input=text, capture_output=True, text=True)
     return p.stderr.strip()
-
 
 def mem_read(args):
     query = args.get('query', '')
-    p = subprocess.run([sys.executable, MEMORY_SCRIPT, 'read', '--query', query],
-                       capture_output=True, text=True)
+    top_k = int(args.get('top_k', DEFAULT_TOP_K))
+    
+    cmd = [sys.executable, MEMORY_SCRIPT, 'read']
+    if query:
+        cmd.extend(['--query', query, '--top-k', str(top_k)])
+    else:
+        cmd.append('--read-all')
+    
+    p = subprocess.run(cmd, capture_output=True, text=True)
     return p.stdout.strip()
-
 
 def summarise_text(args):
     text = args.get('text', '')

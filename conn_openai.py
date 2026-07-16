@@ -1,70 +1,60 @@
 #!/usr/bin/env python3
 """
-OpenAI‑compatible backend connector.
-Works with Ollama, llama.cpp, DeepSeek, Together, Groq, etc.
+OpenAI‑compatible backend connector (spec13).
+Returns the full assistant message object.
 """
 
 import os, json, urllib.request, urllib.error, socket, sys
 from datetime import datetime
 from log import log_write
 
-# Set to False to disable debug dumping to /tmp/openai.txt
-DEBUG_DUMP = os.environ.get('CONN_OPENAI_DEBUG', 'false').lower() == 'true'
+#DEBUG_DUMP = os.environ.get('CONN_OPENAI_DEBUG', 'false').lower() == 'true'
+DEBUG_DUMP = True
 
-def generate(server_config: dict, model: str, prompt: str, options: dict, image_data: list = None) -> str:
+def generate(server_config: dict, model: str, messages: list, options: dict, tools: list = None, image_data: list = None) -> dict:
     """
-    Send a prompt to an OpenAI‑compatible API and return the response text.
-    
-    Args:
-        image_data: optional list of dicts with 'data' (base64) and 'mime' (e.g. 'image/jpeg')
+    Send a prompt to an OpenAI‑compatible API and return the assistant message object.
     """
     base_url = server_config['url'].rstrip('/')
     api_url = f"{base_url}/v1/chat/completions"
 
-    # Build messages – support multimodal if images are present
-    if image_data:
-        content = [{"type": "text", "text": prompt}]
-        for img in image_data:
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{img['mime']};base64,{img['data']}"}
-            })
-        messages = [{"role": "user", "content": content}]
-    else:
-        messages = [{"role": "user", "content": prompt}]
-
     payload = {
         "model": model,
         "messages": messages,
-        "temperature": options.get("temperature", 0.0),
-        "max_tokens": options.get("num_predict", options.get("max_tokens", 4096)),
         "stream": False
     }
+    if tools:
+        payload["tools"] = tools
 
-    if "repeat_penalty" in options:
-        payload["repeat_penalty"] = options["repeat_penalty"]
-    if "repeat_last_n" in options:
-        payload["repeat_last_n"] = options["repeat_last_n"]
-    if "stop" in options:
-        payload["stop"] = options["stop"]
+    # Sampling parameters
+    for param in ["temperature", "max_tokens", "top_k", "top_p", "min_p", "repeat_penalty",
+                  "repeat_last_n", "presence_penalty", "frequency_penalty", "seed", "stop", "chat_template_kwargs"]:
+        if param in options:
+            payload[param] = options[param]
 
     headers = {"Content-Type": "application/json"}
     api_key = server_config.get("api_key")
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    if DEBUG_DUMP:
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        log_write(f"openai {ts}: === API Payload ===\n{json.dumps(payload, indent=2)}")
+
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(api_url, data=data, headers=headers)
 
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with urllib.request.urlopen(req, timeout=900) as resp:
             result = json.loads(resp.read().decode('utf-8'))
-     
+
             if DEBUG_DUMP:
                 ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                log_write(f"openai {ts}: === API Call ===\n{json.dumps(result, indent=2)}")
-       
-            return result["choices"][0]["message"]["content"].strip()
+                log_write(f"openai {ts}: === API Result ===\n{json.dumps(result, indent=2)}")
+
+            # Extract the assistant message from the first choice
+            choice = result["choices"][0]
+            return choice["message"]   # dict with 'role', 'content', and optionally 'tool_calls'
     except urllib.error.HTTPError as e:
         body = e.read().decode() if e.fp else ""
         raise Exception(f"Backend HTTP {e.code}: {body}")
@@ -73,15 +63,13 @@ def generate(server_config: dict, model: str, prompt: str, options: dict, image_
 
 
 def server_reachable(server_config: dict, debug: bool = False) -> bool:
-    """Check if the OpenAI‑compatible backend is responding."""
+    """Check if the backend is reachable (unchanged)."""
     base_url = server_config['url'].rstrip('/')
     health_url = f"{base_url}/v1/models"
-
     headers = {"Content-Type": "application/json"}
     api_key = server_config.get("api_key")
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-
     try:
         req = urllib.request.Request(health_url, headers=headers)
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -91,7 +79,6 @@ def server_reachable(server_config: dict, debug: bool = False) -> bool:
     except Exception as e:
         if debug:
             print(f"  /v1/models failed: {e}", file=sys.stderr)
-
     host = server_config['url'].split("://")[-1].split(":")[0]
     try:
         port = int(server_config['url'].split(":")[-1])
@@ -105,5 +92,4 @@ def server_reachable(server_config: dict, debug: bool = False) -> bool:
     except Exception as e:
         if debug:
             print(f"  TCP connect failed: {e}", file=sys.stderr)
-
     return False

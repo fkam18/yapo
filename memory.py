@@ -111,8 +111,59 @@ def cmd_write(args):
 
     print(f"Stored {len(prefixed_lines)} lines.", file=sys.stderr)
 
+def cmd_delete(args):
+    """Delete documents matching a query (same semantics as read)."""
+    if args.read_all:
+        # Delete all
+        collection = get_collection()
+        all_ids = collection.get()['ids']
+        if all_ids:
+            collection.delete(ids=all_ids)
+            print(f"Deleted all {len(all_ids)} entries.", file=sys.stderr)
+        else:
+            print("No entries to delete.", file=sys.stderr)
+        return
+
+    query = args.query
+    if not query:
+        print("Error: empty query", file=sys.stderr)
+        sys.exit(1)
+
+    n_results = args.top_k
+
+    # Get embedding
+    model_cfg = get_model('embed')
+    if not model_cfg:
+        print("Error: No 'embed' model defined in config.toml", file=sys.stderr)
+        sys.exit(1)
+    url = model_cfg.get('url', 'http://localhost:11434')
+    model = model_cfg['name']
+    emb = get_embedding(url, model, query)
+
+    collection = get_collection()
+    results = collection.query(
+        query_embeddings=[emb],
+        n_results=n_results,
+    )
+    ids = results.get('ids', [[]])[0]
+    if ids:
+        collection.delete(ids=ids)
+        print(f"Deleted {len(ids)} entries.", file=sys.stderr)
+    else:
+        print("No matching entries to delete.", file=sys.stderr)
 
 def cmd_read(args):
+    # Read all documents if --read-all is set
+    if getattr(args, 'read_all', False):
+        collection = get_collection()
+        all_docs = collection.get(include=["documents"])
+        docs = all_docs.get('documents', [])
+        if docs:
+            output_lines = [f"- {doc}" for doc in docs]
+            print('\n'.join(output_lines))
+        else:
+            print("No documents in memory.", file=sys.stderr)
+        return
     """Query memory for similar content."""
     # Read query
     if args.query:
@@ -283,6 +334,7 @@ Examples:
     p_read.add_argument('--query', '-q', type=str, help='Query string')
     p_read.add_argument('--output', '-o', type=str, help='Output file (default: stdout)')
     p_read.add_argument('--top-k', '-k', type=int, default=15, help='Number of results (default: 15)')
+    p_read.add_argument('--read-all', action='store_true', help='Return all stored documents')
 
     # compact
     p_compact = subparsers.add_parser(
@@ -295,6 +347,21 @@ Example:
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
+    # delete
+    p_delete = subparsers.add_parser(
+        'delete',
+        help='Delete documents matching a query',
+        description='Delete documents using the same semantics as read.',
+        epilog="""
+Examples:
+  memory.py delete --query "authentication" --top-k 5
+  memory.py delete --read-all
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p_delete.add_argument('--query', '-q', type=str, help='Query string (documents matching this will be deleted)')
+    p_delete.add_argument('--top-k', '-k', type=int, default=15, help='Max documents to delete (default: 15)')
+    p_delete.add_argument('--read-all', action='store_true', help='Delete all documents')
 
     args = parser.parse_args()
 
@@ -308,6 +375,8 @@ Example:
         cmd_read(args)
     elif args.command == 'compact':
         cmd_compact(args)
+    elif args.command == 'delete':
+        cmd_delete(args)
 
 
 if __name__ == "__main__":

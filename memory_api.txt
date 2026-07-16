@@ -1,0 +1,90 @@
+**REST API Endpoints**
+
+### 1. `POST /api/mem/write`
+Stores lines of text into Yapo memory via ChromaDB (backed by `memory.py`). Accepts an optional **prefix** that gets prepended to each line for clustering.
+
+**Request Body:**
+- `text`: Lines of text to store.
+- `prefix` (optional): Context tag used to prepend `[tag]` before storing lines.
+
+**Example from file:**
+```bash
+curl -X POST http://app1.alt:3388/api/mem/write \
+  -H "Content-Type: application/json" \
+  -d '{"text":"login function is in auth.py","prefix":"project-alpha"}'
+```
+---
+
+### 2. `GET /api/mem/read`
+Searches long-term memory using semantic embedding similarity. Supports destructive reads and pre-read compaction.
+
+**Query Parameters:**
+- `key`: Search query string. Pass empty (`""`) to read all documents.
+- `del=true/false`: Destructive read flag. Deletes exactly the same number of results as a non-destructive search with matching parameters would return.
+- `compact=true/false`: Runs database deduplication/compaction immediately before reading.
+- `top_k`: Number of results returned/deleted (defaults to 15).
+
+**Examples from file:**
+```bash
+# Read by key
+curl "http://app1.alt:3388/api/mem/read?key=login"
+
+# Destructive read (read + delete top matches)
+curl "http://app1.alt:3388/api/mem/read?key=login&del=true"
+
+# Compact then read
+curl "http://app1.alt:3388/api/mem/read?key=project-alpha+login&compact=true"
+```
+*(Note: The conversation also references `/api/tree`, `/api/reload`, and `/api/submit` for job submission/RAG, but they are not detailed here.)*
+---
+
+**CLI Scripts (`yapo_mem_*.py`)**
+These Python scripts act as thin wrappers around the REST API.
+
+### 3. `yapo_mem_write.py`
+Pipes text from stdin to the memory store. Optionally accepts a prefix tag.
+
+**Options:**
+- `--prefix/-p <string>`: Context tag prepended to stored lines.
+
+**Examples from file:**
+```bash
+# Basic write via echo/stdin
+echo "A3198 login function is auth()" | python ./yapo_mem_write.py 
+
+# Write with context prefix
+echo "login function is in auth.py" | python3 yapo_mem_write.py --prefix "project-alpha"
+
+# Pipe from file
+cat facts.txt | python3 yapo_mem_write.py [--prefix "tag"]
+```
+---
+
+### 4. `yapo_mem_read.py`
+Searches or deletes entries from Yapo memory via CLI arguments.
+
+**Arguments:**
+- `-k/--key <string>`: Search query. **Important**: Since prefixes are physically prepended during write, include them directly in this string for exact cluster matching (e.g., `-k "project-alpha login"`). Pass empty string (`""`) to read all documents.
+- `-d/--delete`: Destructive read flag. Deletes exactly what would have been returned by a non-destructive search with identical parameters.
+- `--compact`: Runs database compaction before reading.
+
+**Examples from file:**
+```bash
+# Read all documents
+python3 yapo_mem_read.py -k ""
+
+# Read specific key / cluster
+python3 yapo_mem_read.py -k "A3198"
+python3 yapo_mem_read.py -k "project-alpha login"
+
+# Compact then read
+python3 yapo_mem_read.py -k "login" --compact
+
+# Destructive read (read + delete matches)
+python3 yapo_mem_read.py -k "personal" -d
+
+# Delete everything
+python3 yapo_mem_read.py -k "" -d
+```
+---
+*Note on semantics:* The prefix is stored as plain text `[prefix] content` inside ChromaDB. There are no special bracket characters treated specially; the prefix simply acts as a short clustering tag prepended during write, which must be included in future reads for accurate filtering.
