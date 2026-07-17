@@ -1,4 +1,4 @@
-**Current Release:** v2.3.0
+**Current Release:** v2.4.0
 
 # Yapo – Yet Another Personal Orchestrator
 
@@ -30,96 +30,106 @@ Yapo is designed to run **24×7 as a Docker container** on a headless server. Al
 
 1. **Configure your laptop** — edit `config.toml` with your server IPs, model names, and paths.
 2. **Build the Docker image:**
-```bash
-cd docker
-./build.sh
+   ```bash
+   cd docker
+   ./build.sh
+   ```
+3. **Deploy to Server:**
+   ```bash
+   ./deploy-to-app1.sh
+   ```
+4. **Access the dashboard** at `http://<server-ip>:3388`.
 
-    Deploy to Server:
+---
 
-bash
-
-./deploy-to-app1.sh
-
-    Access the dashboard at http://<server-ip>:3388.
-
-Development (CLI)
+## Development (CLI)
 
 For local development and testing without Docker:
 
-    Clone and set up a venv:
+1. **Clone and set up a venv:**
+   ```bash
+   git clone https://github.com/fkam18/yapo.git
+   cd yapo
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install chromadb
+   ```
+2. **Configure** — copy `config.example.toml` to `config.toml` and fill in your details.
+3. **Create the job folders:**
+   ```bash
+   mkdir -p ~/yapo/jobs/{ready,processing,pending,done,error}
+   ```
+4. **Start the scheduler:**
+   ```bash
+   python3 yapo.py
+   ```
+5. **Submit a job:**
+   ```bash
+   python3 init.py "Write a Python function to sort a list"
+   ```
+6. **Inspect the result:**
+   ```bash
+   python3 catjob.py <queue-number>
+   ```
 
-bash
+---
 
-git clone https://github.com/fkam18/yapo.git
-cd yapo
-python3 -m venv venv
-source venv/bin/activate
-pip install chromadb
+## API Reference
 
-    Configure — copy config.example.toml to config.toml and fill in your details.
+All endpoints are available at `http://<server>:3388`.
 
-    Create the job folders:
+### Job Submission & Retrieval
 
-bash
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| **POST** | `/api/submit` | Submit a new job (with optional attachments, RAG, time constraints) |
+| **GET** | `/api/job/<qno>` | Get job details and output |
+| **GET** | `/api/job/<qno>?wait=true&timeout=300` | Block until job completes or timeout |
+| **GET** | `/api/job/<qno>/download` | Download job folder as tar.gz |
 
-mkdir -p ~/yapo/jobs/{ready,processing,pending,done,error}
+### Job Listing & Deletion
 
-    Start the scheduler:
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| **GET** | `/api/tree` | Full job hierarchy with parent/child relationships |
+| **DELETE** | `/api/job/<qno>` | Delete a job and all its descendants recursively |
+| **DELETE** | `/api/jobs?from=X&to=Y&state=done` | Bulk‑delete jobs in a range |
 
-bash
+### Workspace File Management (new in v2.3)
 
-python3 yapo.py
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| **GET** | `/api/ws/list?path=<rel>` | List directory contents in the workspace |
+| **GET** | `/api/ws/download?path=<rel>` | Download a file from the workspace |
+| **POST** | `/api/ws/upload` | Upload a file (JSON body with base64 content) |
+| **POST** | `/api/ws/mkdir` | Create a directory in the workspace |
+| **DELETE** | `/api/ws/delete?path=<rel>` | Delete a file or empty directory |
 
-    Submit a job:
+### Config & Monitoring
 
-bash
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| **GET** | `/api/config` | Get current `config.toml` as JSON |
+| **POST** | `/api/reload` | Reload config (sends SIGHUP to scheduler) |
+| **PATCH** | `/api/config` | Update a runtime config key (e.g. toggle debug) |
+| **GET** | `/api/logs?lines=99999` | Get all log lines then delete them from server |
+| **GET** | `/api/debug/openai` | Download OpenAI API debug log |
+| **GET** | `/api/health` | Health check (returns `{"status":"ok"}`) |
 
-python3 init.py "Write a Python function to sort a list"
+### Web UI
 
-    Inspect the result:
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| **GET** | `/` | Interactive web dashboard |
+| **GET** | `/api/queues` | HTML fragment for auto‑refresh |
 
-bash
+---
 
-python3 catjob.py <queue-number>
+## Directory Layout
 
-API Reference
-
-All endpoints are available at http://<server>:3388.
-Job Submission & Retrieval
-Method	Endpoint	Description
-POST	/api/submit	Submit a new job (with optional attachments, RAG, time constraints)
-GET	/api/job/<qno>	Get job details and output
-GET	/api/job/<qno>?wait=true&timeout=300	Block until job completes or timeout
-GET	/api/job/<qno>/download	Download job folder as tar.gz
-Job Listing & Deletion
-Method	Endpoint	Description
-GET	/api/tree	Full job hierarchy with parent/child relationships
-DELETE	/api/job/<qno>	Delete a job and all its descendants recursively
-DELETE	/api/jobs?from=X&to=Y&state=done	Bulk‑delete jobs in a range
-Workspace File Management (new in v2.3)
-Method	Endpoint	Description
-GET	/api/ws/list?path=<rel>	List directory contents in the workspace
-GET	/api/ws/download?path=<rel>	Download a file from the workspace
-POST	/api/ws/upload	Upload a file (JSON body with base64 content)
-POST	/api/ws/mkdir	Create a directory in the workspace
-DELETE	/api/ws/delete?path=<rel>	Delete a file or empty directory
-Config & Monitoring
-Method	Endpoint	Description
-GET	/api/config	Get current config.toml as JSON
-POST	/api/reload	Reload config (sends SIGHUP to scheduler)
-PATCH	/api/config	Update a runtime config key (e.g. toggle debug)
-GET	/api/logs?lines=99999	Get all log lines then delete them from server
-GET	/api/debug/openai	Download OpenAI API debug log
-GET	/api/health	Health check (returns {"status":"ok"})
-Web UI
-Method	Endpoint	Description
-GET	/	Interactive web dashboard
-GET	/api/queues	HTML fragment for auto‑refresh
-Directory Layout
-text
-
-yapo/                        ← project source
-├── docker/                  ← Docker & Ansible deployment files
+```text
+yapo/                         ← project source
+├── docker/                   ← Docker & Ansible deployment files
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   ├── build.sh
@@ -130,25 +140,28 @@ yapo/                        ← project source
 │   ├── convert-config.py
 │   ├── entrypoint.sh
 │   └── requirements.txt
-├── yapo.py                  ← scheduler main loop
-├── runner.py                ← single job executor (OpenAI native tool‑calling)
-├── jobber.py                ← job CRUD operations
-├── init.py                  ← CLI job submission (dev)
-├── dashboard.py             ← Web UI + REST API server (now includes workspace endpoints)
-├── config.py                ← configuration loader
-├── conn_openai.py           ← OpenAI‑compatible backend
-├── yapo_mcp.py              ← MCP server (router, memory, summarise)
-├── shell_mcp.py             ← MCP server (restricted shell)
-├── web_search_mcp.py        ← MCP server (SearXNG wrapper)
-├── filesystem_mcp.py        ← MCP server (workspace file operations) [new]
-├── memory.py                ← ChromaDB vector memory
-├── summarise.py             ← document / turn summarisation
-├── catjob.py                ← CLI job inspector
-├── catanswer.py             ← extract answer from job output
-├── dashboard.theme          ← dashboard CSS theme
-├── config.toml.example      ← sample configuration
-└── spec15.txt               ← full design specification (v15) [updated]
+├── yapo.py                   ← scheduler main loop
+├── runner.py                 ← single job executor (OpenAI native tool‑calling)
+├── jobber.py                 ← job CRUD operations
+├── init.py                   ← CLI job submission (dev)
+├── dashboard.py              ← Web UI + REST API server (now includes workspace endpoints)
+├── config.py                 ← configuration loader
+├── conn_openai.py            ← OpenAI‑compatible backend
+├── yapo_mcp.py               ← MCP server (router, memory, summarise)
+├── shell_mcp.py              ← MCP server (restricted shell)
+├── web_search_mcp.py         ← MCP server (SearXNG wrapper)
+├── filesystem_mcp.py         ← MCP server (workspace file operations) [new]
+├── memory.py                 ← ChromaDB vector memory
+├── summarise.py              ← document / turn summarisation
+├── catjob.py                 ← CLI job inspector
+├── catanswer.py              ← extract answer from job output
+├── dashboard.theme           ← dashboard CSS theme
+├── config.toml.example       ← sample configuration
+└── spec15.txt                ← full design specification (v15) [updated]
+```
 
-License
+---
+
+## License
 
 MIT
