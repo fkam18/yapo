@@ -12,8 +12,10 @@ services:
       - /home/master/yapo/config.toml:/app/config.toml:ro
       - /home/master/yapo/secrets:/app/secrets:ro
       - yapo_data:/home/yapo/yapo_root
+      - workspace:/ws
     environment:
       - YAPO_CONFIG=/app/config.toml
 
 volumes:
   yapo_data:
+  workspace:

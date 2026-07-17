@@ -691,6 +691,20 @@ def get_job_details(qno):
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
+
+    def _safe_ws_path(self, rel_path):
+        abs_path = os.path.realpath(os.path.join('/ws', rel_path.lstrip('/')))
+        # Allow the workspace root itself or any path inside it
+        if abs_path != '/ws' and not abs_path.startswith('/ws/'):
+            raise ValueError("Path outside workspace")
+        return abs_path
+
+    def send_json(self, status, data):
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -861,6 +875,50 @@ class DashboardHandler(BaseHTTPRequestHandler):
             details = get_job_details(qno)
             self.wfile.write(json.dumps(details).encode())
 
+        # ── Workspace file endpoints ──
+        elif path == '/api/ws/list':
+            query = parse_qs(parsed.query)
+            dir_rel = query.get('path', [''])[0]
+            try:
+                dir_path = self._safe_ws_path(dir_rel)
+            except ValueError as e:
+                self.send_json(403, {'error': str(e)})
+                return
+
+            if not os.path.isdir(dir_path):
+                self.send_json(404, {'error': 'Not a directory'})
+                return
+            entries = []
+            for name in sorted(os.listdir(dir_path)):
+                full = os.path.join(dir_path, name)
+                entries.append({
+                    'name': name,
+                    'type': 'directory' if os.path.isdir(full) else 'file',
+                    'size': os.path.getsize(full) if os.path.isfile(full) else None
+                })
+            self.send_json(200, {'path': dir_rel, 'entries': entries})
+
+        elif path == '/api/ws/download':
+            query = parse_qs(parsed.query)
+            file_rel = query.get('path', [''])[0]
+            try:
+                file_path = self._safe_ws_path(file_rel)
+            except ValueError as e:
+                self.send_json(403, {'error': str(e)})
+                return
+
+            if not os.path.isfile(file_path):
+                self.send_json(404, {'error': 'File not found'})
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Content-Disposition', f'attachment; filename="{os.path.basename(file_path)}"')
+            self.send_header('Content-Length', str(os.path.getsize(file_path)))
+            self.end_headers()
+            with open(file_path, 'rb') as f:
+                self.wfile.write(f.read())
+        # ── Workspace file endpoints ──
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -988,6 +1046,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({'error': f'Unknown config key: {key}'}).encode())
 
+        # ── Workspace upload / mkdir ──
+        elif path == '/api/ws/upload':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body)
+            file_rel = data.get('path', '')
+            content_b64 = data.get('content', '')
+            try:
+                file_path = self._safe_ws_path(file_rel)
+            except ValueError as e:
+                self.send_json(403, {'error': str(e)})
+                return
+
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            try:
+                with open(file_path, 'wb') as f:
+                    f.write(base64.b64decode(content_b64))
+                self.send_json(200, {'success': True, 'path': file_rel})
+            except Exception as e:
+                self.send_json(500, {'error': str(e)})
+
+        elif path == '/api/ws/mkdir':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body)
+            dir_rel = data.get('path', '')
+            try:
+                dir_path = self._safe_ws_path(dir_rel)
+            except ValueError as e:
+                self.send_json(403, {'error': str(e)})
+                return
+            os.makedirs(dir_path, exist_ok=True)
+            self.send_json(200, {'success': True})
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -1051,7 +1143,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({'success': True, 'deleted': deleted, 'count': len(deleted)}).encode())
-        
+
+        elif path.startswith('/api/ws/delete'):
+            query = parse_qs(parsed.query)
+            file_rel = query.get('path', [''])[0]
+            try:
+                file_path = self._safe_ws_path(file_rel)
+            except ValueError as e:
+                self.send_json(403, {'error': str(e)})
+                return
+            if not os.path.exists(file_path):
+                self.send_json(404, {'error': 'Not found'})
+                return
+            if os.path.isdir(file_path):
+                if len(os.listdir(file_path)) > 0:
+                    self.send_json(400, {'error': 'Directory not empty'})
+                    return
+                os.rmdir(file_path)
+            else:
+                os.remove(file_path)
+            self.send_json(200, {'success': True})
+
         else:
             self.send_response(404)
             self.end_headers()

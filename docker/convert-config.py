@@ -12,6 +12,7 @@ REPLACEMENTS = {
     '"/home/fkam/apps/yapo/yapo_mcp.py"': '"/app/yapo_mcp.py"',
     '"/home/fkam/apps/yapo/web_search_mcp.py"': '"/app/web_search_mcp.py"',
     '"/home/fkam/apps/yapo/shell_mcp.py"': '"/app/shell_mcp.py"',
+    '"/home/fkam/apps/yapo/filesystem_mcp.py"': '"/app/filesystem_mcp.py"',
     # Secrets path
     '"/home/fkam/apps/yapo/secrets/gpu/id_rsa"': '"/app/secrets/gpu/id_rsa"',
     # Workspace and runtime roots

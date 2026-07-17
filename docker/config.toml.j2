@@ -189,15 +189,6 @@ protocol = "simple"
 env = { SEARXNG_URL = "http://app2.alt:8080" }
 description = "Web search via SearXNG (custom wrapper)"
 
-[[mcp_servers]]
-name = "shell-mcp"
-transport = "stdio"
-command = "python3"
-args = ["/app/shell_mcp.py"]
-env = { YAPO_WORKSPACE = "/home/master/apps" }
-protocol = "simple"
-description = "Restricted shell command execution"
-
 [[tools]]
 name = "route_prompt"
 description = "Classify a prompt as code, others, or visual"
@@ -251,15 +242,66 @@ implementation = "mcp"
 mcp_server = "searxng-mcp"
 mcp_tool = "web_search"
 
+[[mcp_servers]]
+name = "filesystem-mcp"
+transport = "stdio"
+command = "python3"
+args = ["/app/filesystem_mcp.py"]
+protocol = "simple"
+description = "Workspace file operations"
+
 [[tools]]
-name = "run_command"
-description = "Run a restricted shell command"
-parameters = [
-  { name = "command", type = "string", required = true },
-  { name = "timeout", type = "integer", required = false }
-]
-concurrent_calls = 10
-timeout_seconds = 30
+name = "read_file"
+description = "Read the contents of a file in the workspace"
+parameters = [{ name = "path", type = "string", required = true }]
+concurrent_calls = 5
+timeout_seconds = 10
 implementation = "mcp"
-mcp_server = "shell-mcp"
-mcp_tool = "run_command"
+mcp_server = "filesystem-mcp"
+mcp_tool = "read_file"
+
+[[tools]]
+name = "write_file"
+description = "Write content to a file in the workspace"
+parameters = [
+  { name = "path", type = "string", required = true },
+  { name = "content", type = "string", required = true }
+]
+concurrent_calls = 5
+timeout_seconds = 10
+implementation = "mcp"
+mcp_server = "filesystem-mcp"
+mcp_tool = "write_file"
+
+[[tools]]
+name = "list_directory"
+description = "List contents of a workspace directory"
+parameters = [{ name = "path", type = "string", required = false }]
+concurrent_calls = 5
+timeout_seconds = 5
+implementation = "mcp"
+mcp_server = "filesystem-mcp"
+mcp_tool = "list_directory"
+
+[[tools]]
+name = "create_directory"
+description = "Create a directory in the workspace"
+parameters = [{ name = "path", type = "string", required = true }]
+concurrent_calls = 5
+timeout_seconds = 5
+implementation = "mcp"
+mcp_server = "filesystem-mcp"
+mcp_tool = "create_directory"
+
+[[tools]]
+name = "search_files"
+description = "Search for a regex pattern inside files in the workspace"
+parameters = [
+  { name = "path", type = "string", required = false },
+  { name = "pattern", type = "string", required = true }
+]
+concurrent_calls = 5
+timeout_seconds = 15
+implementation = "mcp"
+mcp_server = "filesystem-mcp"
+mcp_tool = "search_files"
