@@ -10,7 +10,7 @@ import sys, json, subprocess, os, re
 # ============================================================
 # Configuration – adjust as needed
 # ============================================================
-WORKSPACE = os.environ.get('YAPO_WORKSPACE', '/home/fkam/apps')
+WORKSPACE = os.environ.get('YAPO_WORKSPACE', '/ws')
 ALLOWED_COMMANDS = {
     'git', 'find', 'grep', 'ls', 'cat', 'head', 'tail', 'wc',
     'diff', 'patch', 'mkdir', 'rm', 'cp', 'mv', 'chmod', 'chown',

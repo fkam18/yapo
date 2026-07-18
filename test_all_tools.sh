@@ -1,7 +1,9 @@
 #!/bin/bash
+# SHOULD RUN in docker host as /ws is mounted over there
 # test_all_tools.sh – verify that each MCP tool can be called successfully
+# Updated to include filesystem tools (spec15) and correct web search test.
 set -e
-cd /home/fkam/apps/yapo
+cd /app
 
 echo "=== Testing all MCP tools ==="
 
@@ -25,19 +27,41 @@ echo "--- summarise_text ---"
 echo '{"tool":"summarise_text","arguments":{"text":"This is a long text that needs summarising. It contains multiple sentences.","max_points":2}}' | python3 yapo_mcp.py
 echo ""
 
-# 5. web_search (via searxng-mcp, requires npx / searxng running)
+# 5. web_search (via web_search_mcp.py – custom SearXNG wrapper)
 echo "--- web_search ---"
-echo '{"tool":"web_search","arguments":{"query":"Yapo orchestrator"}}' | python3 -c "
-import sys,json,subprocess
-req=json.load(sys.stdin)
-proc=subprocess.run(['npx','-y','mcp-searxng'], input=json.dumps(req), capture_output=True, text=True, timeout=10)
-print(proc.stdout or proc.stderr)
-" 2>&1 || echo "web_search failed (SearXNG MCP not running?)"
+echo '{"tool":"web_search","arguments":{"query":"Yapo orchestrator"}}' | python3 web_search_mcp.py
 echo ""
 
 # 6. run_command (via shell-mcp)
 echo "--- run_command ---"
 echo '{"tool":"run_command","arguments":{"command":"echo hello from tool","timeout":5}}' | python3 shell_mcp.py
 echo ""
+
+# 7-11. Filesystem tools (via filesystem_mcp.py, spec15)
+# Ensure the workspace directory exists
+mkdir -p /ws/testdir
+
+echo "--- list_directory ---"
+echo '{"tool":"list_directory","arguments":{"path":"/ws"}}' | python3 filesystem_mcp.py
+echo ""
+
+echo "--- create_directory ---"
+echo '{"tool":"create_directory","arguments":{"path":"/ws/testdir/sub1"}}' | python3 filesystem_mcp.py
+echo ""
+
+echo "--- write_file ---"
+echo '{"tool":"write_file","arguments":{"path":"/ws/testdir/hello.txt","content":"Hello from test"}}' | python3 filesystem_mcp.py
+echo ""
+
+echo "--- read_file ---"
+echo '{"tool":"read_file","arguments":{"path":"/ws/testdir/hello.txt"}}' | python3 filesystem_mcp.py
+echo ""
+
+echo "--- search_files ---"
+echo '{"tool":"search_files","arguments":{"path":"/ws","pattern":"hello"}}' | python3 filesystem_mcp.py
+echo ""
+
+# Clean up
+rm -rf /ws/testdir
 
 echo "=== All tools tested ==="

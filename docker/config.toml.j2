@@ -9,7 +9,7 @@ collection = "conversations"
 compact_size_kb = 50
 
 # Global default job duration – jobs running longer than this are killed
-max_job_duration = 900   # 15 minutes in seconds
+max_job_duration = 300   
 
 [[servers]]
 name = "nuc"
@@ -34,7 +34,7 @@ backend = "openai"
   [servers.gpu_schedule]
   timezone = "Europe/London"
   on_demand = true
-  idle_timeout_seconds = 60
+  idle_timeout_seconds = 120
   windows = [
     { start = "02:00", end = "03:00" },
     { start = "22:00", end = "23:00" }
@@ -74,8 +74,15 @@ type = "code-test"
 server = "gpu"
 tool_allowed = true
 max_tokens = 16384
+chat_template_kwargs = { enable_thinking = true }
+max_turns = 4
 system_prompt = """
-You are an expert assistant. When asked to write code, output the complete code directly, not a plan or description. 
+You are an expert assistant with access to tools.
+- Use a tool ONLY when you need information you don't already have.
+- When you have gathered enough information from tool results, stop calling tools and provide your final answer directly.
+- Do not repeat the same tool call with the same arguments if you already have the result.
+- Once you know the answer, output it immediately without any further tool calls.
+- Once a file has been successfully written, do not write it again unless explicitly asked to modify it.
 """
 
 [[models]]
@@ -100,6 +107,7 @@ You are an expert assistant with access to tools.
 - When you have gathered enough information from tool results, stop calling tools and provide your final answer directly.
 - Do not repeat the same tool call with the same arguments if you already have the result.
 - Once you know the answer, output it immediately without any further tool calls.
+- Once a file has been successfully written, do not write it again unless explicitly asked to modify it.
 """
 
 [[models]]

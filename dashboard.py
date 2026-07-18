@@ -68,13 +68,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           <label for="job-mtype">Model type</label>
           <select id="job-mtype">
             <option value="">Auto (router)</option>
-            <option value="code-qwen3">code-qwen3</option>
-            <option value="code-test">code-test</option>
-            <option value="code">code</option>
-            <option value="code-plan">code-plan</option>
-            <option value="others">others</option>
-            <option value="others-14b">others-14b</option>
-            <option value="visual">visual</option>
+            {MODEL_OPTIONS}
           </select>
         </div>
         <div class="form-group">
@@ -714,8 +708,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'text/html')
             self.end_headers()
+            
+            # Dynamically extract unique model types from config, omitting 'embed' and 'summarise' if needed
+            model_types = []
+            for m in config.get('models', []):
+                mtype = m.get('type')
+                if mtype and mtype not in model_types and mtype not in ('embed', 'summarise', 'router'):
+                    model_types.append(mtype)
+            
+            # Generate the option elements string
+            options_html = "\n".join([f'            <option value="{mtype}">{mtype}</option>' for mtype in model_types])
+            
             queues_html = build_queue_html()
-            html = HTML_TEMPLATE.replace('{QUEUES}', queues_html).replace('{THEME}', f'<style>{theme_css}</style>')
+            html = HTML_TEMPLATE.replace('{QUEUES}', queues_html)\
+                                 .replace('{THEME}', f'<style>{theme_css}</style>')\
+                                 .replace('{MODEL_OPTIONS}', options_html)
             self.wfile.write(html.encode())
 
         elif path == '/api/queues':

@@ -249,11 +249,10 @@ def build_payload(job, config, turn_number=0, max_turns=5):
 
     if turn_number == 0:
         user_message_content = task + "\n\n" + convergence_note
+        # Inject attachments into user message
+        user_message_content = inject_attachments_into_message(job_folder, user_message_content)
     else:
         user_message_content = convergence_note
-
-    # Inject attachments into user message
-    user_message_content = inject_attachments_into_message(job_folder, user_message_content)
 
     # Build options dict from model config
     options = {}

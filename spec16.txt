@@ -1,0 +1,236 @@
+# Orchestrator Design v16 – spec16.txt (2026-07-17)
+===========================================================
+This revision merges the persistent, sandboxed filesystem workspace and 
+plain-text tool infrastructure from v15 with the complete REST API 
+reference and central logging architecture (log.py) originally specified 
+in v11. It resolves historical omissions across versions 11 to 15, 
+retaining the OpenAI-compatible chat native history (conversation.json), 
+per-model max_turns thresholds, dynamic convergence notes, and robust 
+GPU energy management.
+
+1. Overview
+-----------
+Yapo (Yet Another Personal Orchestrator) is a home‑lab orchestrator that 
+manages stateless LLM jobs using a folder‑based job pool. A jobber 
+serialises all state transitions. The main loop (`yapo.py`) picks jobs 
+from `ready`, respects server and tool capacity, and forks runner processes. 
+The runner assembles a structured OpenAI‑compatible payload, calls the 
+LLM via a pluggable backend connector, and parses the standard 
+chat‑completion response. Context accumulates as a conversation 
+transcript (`conversation.json`); when it becomes too large, the runner 
+compacts it via MCP tool calls.
+
+All tool execution (memory, summarisation, web search, shell commands, 
+filesystem operations, and routing) is delegated to external MCP servers. 
+There are no separate “embed”, “summarise”, or “router” job types – these 
+are MCP tools called directly.
+
+LLM calls use `conn_openai.py`, which speaks the OpenAI‑compatible 
+`/v1/chat/completions` protocol (working with Ollama, llama.cpp, and 
+cloud providers).
+
+The system runs as a Docker container for 24×7 operation on a headless 
+server. A comprehensive REST API (served by the dashboard on port 3388) 
+provides full job lifecycle management, workspace volume file operations, 
+config reload, non-blocking logging, and health checks. An Ansible playbook 
+handles one‑command deployment.
+
+GPU energy management supports per‑server power schedules, Wake‑on‑LAN, 
+SSH‑based suspend, on‑demand mode with idle timeout, and per‑job time 
+constraints (`start_after` / `max_job_duration`).
+
+2. Terminology
+---------------
+- **Job type** (`job.toml` field `"type"`): `"main"` or `"tool"`.
+- **Model type** (`config.toml` model field `"type"`): classification 
+  used by the router or manual override. Values include `"code"`, 
+  `"others"`, `"visual"`, and user-defined types. The CLI flag for forcing 
+  a model type is `--mtype`, read dynamically from config.toml by `init.py`.
+- **Model name** (`config.toml` model field `"name"`): server‑side 
+  identifier passed to the LLM backend (e.g. `"qwen3-coder-30b"`).
+- `system_prompt`: a string in `config.toml` under `[[models]]`; it becomes 
+  the `content` of the `"system"` role message.
+- `conversation.json`: a persistent array of message objects representing 
+  the entire dialogue history with the LLM for a main job. It contains 
+  only `user`, `assistant`, and `tool` messages; the system prompt is 
+  prepended at request time.
+- `max_turns`: per‑model integer (default 5) limiting the number of 
+  assistant‑tool‑result cycles before the job is forced to finish.
+- `convergence_note`: dynamic instruction injected into the `"user"` role 
+  message, not the system prompt. Its wording escalates as the number of 
+  completed turns approaches `max_turns`.
+- `workspace`: the persistent file storage rooted at `/ws` inside the 
+  `yapo` container, backed by a Docker named volume. All file‑oriented 
+  MCP tools (and the dashboard REST API) operate strictly within this tree.
+
+3. Folder Structure & States
+-------------------------------
+jobs/
+  ready/         – jobs waiting to be picked by the scheduler
+  processing/    – job currently being executed by a runner
+  pending/       – job waiting for sub‑jobs (tool children) to finish
+  done/          – job completed successfully
+  error/         – job failed (terminal state)
+
+All state changes are atomic via jobber (serialised by jobber.lock).
+
+4. Job Folder Contents
+-----------------------
+  job.toml               – job metadata (job_id, type, model_type, parent,
+                           name, tool_name, start_after, max_job_duration,
+                           fail_on_child_error, compact, etc.)
+  parent.<qno>           – empty marker for parent queue number
+  sub.<qno>              – empty marker per direct child (managed by jobber)
+  prompt.txt             – the original user task or tool prompt
+  conversation.json      – full conversation array (list of message dicts)
+                           for the main job’s LLM history (initialized to `[]`)
+  context.txt            – (legacy) accumulated tool results; retained for backward
+                           compatibility but phased out in favor of conversation.json
+  output.txt             – LLM response (plain text/JSON field) or tool result
+  full_payload.json      – (diagnostic) exact JSON payload sent to LLM
+  tool_call.json         – present in tool jobs; the entire tool‑call
+                           object from the assistant message, including the `id`
+  assets/                – optional attached files (text, code, images, PDFs)
+
+5. Component Summary
+---------------------
+5.1 jobber.py
+    Serialised CRUD operations for jobs. Handles creation of jobs, including 
+    the `attachments` parameter (saving files to the job's `assets/` folder) 
+    and initializes an empty `conversation.json` array `[]` for main jobs.
+
+5.2 runner.py
+    Executes a job from the processing state.
+    - **Main Jobs**: Builds payloads using `system_prompt` and history from 
+      `conversation.json`. If `model_type` is empty, invokes the `route_prompt` 
+      tool first. Handles `assets/` context embedding (text files wrapped in 
+      `<FILE>` blocks; images base64-encoded for multimodal vision backend).
+    - **Plain‑text tool results**: MCP tools write human‑readable strings to 
+      stdout. The runner treats any non‑zero exit as a failure and moves the 
+      tool job to `error`. A zero exit maps the text verbatim to the `"content"` 
+      of the `tool` role message without JSON-parsing, preventing hallucinations.
+    - **Tool-call loop control**: Governed by per-model `max_turns` constraints.
+
+5.3 yapo.py (scheduler)
+    Forever loop managing job executions:
+    - Enforces `start_after`, `max_job_duration`, server/tool capacities.
+    - Directs per‑server GPU schedules (windows, on‑demand, WoL, SSH suspend).
+    - Handles SIGHUP to reload configuration dynamically at runtime.
+    - Routes stderr logs through the custom `LogStderr` wrapper into `log.py`.
+
+5.4 init.py (CLI tool)
+    Creates a main job from a user prompt. Supports CLI parameter overrides 
+    such as `--mtype`, `--name`, `--start-after`, `--max-duration`, and `--rag`.
+
+5.5 dashboard.py
+    Serves the web UI (port 3388) and handles full REST API processing. Displays 
+    structured tool-calls (function names/arguments), raw outputs, and provides 
+    workspace management REST endpoints.
+
+5.6 conn_openai.py
+    Pluggable backend connector for OpenAI-compatible `/v1/chat/completions`. 
+    Handles multimodal vision payloads, extracts `tool_calls` structures natively, 
+    and passes extra parameters like `chat_template_kwargs`. Supports runtime 
+    debug toggles via `log_write()`.
+
+5.7 filesystem_mcp.py
+    A simple stdio-based MCP server providing workspace file execution (`read_file`, 
+    `write_file`, `list_directory`, `create_directory`, `search_files`). Traversal 
+    is strictly guarded to `/ws`.
+
+6. Prompt Construction & Dynamic Convergence
+---------------------------------------------
+6.1 Building the Payload
+    - Prepend system message: `{"role": "system", "content": "<system_prompt>"}`
+    - Append all history records from `conversation.json`.
+    - Append the current user turn message. On Turn 0, this contains the prompt 
+      and assets. After Turn 0, the user message contains **only** the 
+      dynamically scaled convergence note to prevent infinite loop triggers.
+    - Pack non-route tools into the standard OpenAI `tools` function array.
+
+6.2 Dynamic Convergence Scale
+    The convergence warning scales proportionally based on `max_turns`:
+    - Early Turns: "If the task is a straightforward coding or writing request that you can complete with your own knowledge, do it immediately without calling any tool."
+    - Penultimate Turn: "You have called tools several times. You MUST now provide the final answer using the information you have. Do NOT call any more tools."
+    - Final Turn (`Turn >= max_turns`): "This is your LAST chance. Produce the final answer NOW. Do NOT call any tools."
+
+7. Filesystem Workspace & Sandboxing
+-------------------------------------
+7.1 Docker Volume Mounts
+    A named Docker volume `workspace` is declared in `docker-compose.yml` and 
+    mounted at `/ws` (read-write). Path confinement ensures that attempts to 
+    escape (e.g., via `../../etc/passwd`) are caught and blocked via 
+    `os.path.realpath` prefix verification.
+
+7.2 MCP Filesystem Tools
+    - `read_file(path)` -> contents as plain text.
+    - `write_file(path, content)` -> confirmation message.
+    - `list_directory(path?)` -> text list with folder/file designators.
+    - `create_directory(path)` -> confirmation message.
+    - `search_files(path?, pattern)` -> grep-like result listings.
+
+8. Central Logging Architecture (log.py)
+-----------------------------------------
+A thread‑safe, non‑blocking centralized log module operates at `/tmp/yapo.log`:
+- `log_write(line)`: Appends lines under a 1-second maximum `fcntl.flock` acquisition timeout. Truncates the log file to zero automatically if its size exceeds 1 MB (`MAX_SIZE`).
+- `log_read(max_lines=100)`: Non-blocking destructive read that pulls the latest `max_lines` records and clears the underlying storage file.
+- Format: `[source_tag] YYYY-MM-DD HH:MM:SS: <message>` (e.g., `yapo`, `openai`).
+
+9. REST API Reference
+----------------------
+All endpoints are served by `dashboard.py` on port 3388.
+
+9.1 Job Submission & Retrieval
+    - POST /api/submit
+      Body: {"prompt": "...", "mtype": "...", "name": "...", "start_after": "HH:MM", "max_duration": "900", "rags": [...], "attachments": [...]}
+      Returns: {"success": true, "qno": "42"}
+    - GET /api/job/<qno>
+      Returns: Full status JSON dictionary including state, output, model_type, etc.
+    - GET /api/job/<qno>?wait=true&timeout=300
+      Blocks execution until the job completes or hits the timeout threshold.
+    - GET /api/job/<qno>/download
+      Downloads the entire folder framework encapsulated as a compressed `.tar.gz` archive.
+
+9.2 Job Listing & Deletion
+    - GET /api/tree
+      Returns full hierarchical job trees tracking parent-to-child dependencies in nested JSON format.
+    - DELETE /api/job/<qno>
+      Recursively deletes the chosen job folder along with all nested descendant records.
+    - DELETE /api/jobs?from=X&to=Y&state=done
+      Bulk-deletes jobs across the designated ID boundaries, filtered optionally by state.
+
+9.3 Workspace File Management
+    - GET /api/ws/list?path=<rel>
+      Lists directory information inside the sandboxed workspace folder.
+    - GET /api/ws/download?path=<rel>
+      Downloads specific target files straight from the volume layout.
+    - POST /api/ws/upload
+      Uploads a new file. Body expects a JSON object containing `path` and `content` (encoded as base64 strings).
+    - POST /api/ws/mkdir
+      Creates subdirectories inside the relative workspace pathing matrix.
+    - DELETE /api/ws/delete?path=<rel>
+      Deletes specific files or empty directory trees safely.
+
+9.4 Configuration & Runtime Controls
+    - GET /api/config
+      Returns the active `config.toml` records formatted as raw JSON.
+    - POST /api/reload
+      Issues a runtime SIGHUP signal to the background scheduler loop to trigger configuration reloads.
+    - PATCH /api/config
+      Modifies runtime variable states dynamically (e.g., `{"key":"CONN_OPENAI_DEBUG","value":"true"}`).
+
+9.5 Monitoring & Diagnostics
+    - GET /api/logs?lines=100
+      Invokes `log_read()` directly to supply recent log data. Instantly non-blocking.
+    - GET /api/debug/openai
+      Downloads localized API diagnostic trace logs (`/tmp/openai.txt`) if retained, or fetches aggregated lines.
+    - GET /api/health
+      Confirms scheduler availability, returning `{"status": "ok"}`.
+
+9.6 Web UI Renderers
+    - GET /
+      Serves the primary web user interface interface.
+    - GET /api/queues
+      Returns contextual HTML block fragments tailored for asynchronous UI state re-rendering.
+
+(This document supersedes all previous specifications from spec11.txt to spec15.txt.)

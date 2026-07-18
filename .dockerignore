@@ -3,6 +3,7 @@ docker/yapo.tar.gz
 venv/
 secrets/
 local/
+tmp/
 memory_db/
 jobs/
 __pycache__/
@@ -11,8 +12,6 @@ __pycache__/
 .env
 *.md
 spec*.txt
-test_*.sh
-test_*.py
 mock_*.py
 ansible-venv/
 exclude.txt
