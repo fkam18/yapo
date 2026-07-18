@@ -8,6 +8,8 @@ from conn_openai import generate as call_openai
 from jobber import read_job_toml, move_job_folder, JOBS_DIR, acquire_lock, release_lock
 from config import load_config, get_tool, get_server, get_model_for_type, get_yapo_root
 from json_repair import repair_json
+from log import redirect_stderr
+redirect_stderr("runner")   
 
 YAPO_ROOT = get_yapo_root()
 JOBS_DIR = os.path.join(YAPO_ROOT, 'jobs')

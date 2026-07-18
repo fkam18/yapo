@@ -12,6 +12,8 @@ Usage:
 import os, sys, shutil, json, uuid, time, argparse, fcntl, base64
 
 from config import get_yapo_root
+from log import redirect_stderr
+redirect_stderr("jobber")  
 
 YAPO_ROOT = get_yapo_root()
 JOBS_DIR = os.path.join(YAPO_ROOT, 'jobs')

@@ -87,3 +87,26 @@ def log_read(max_lines: int = 100) -> str:
     _log_size = 0
 
     return ''.join(recent)
+
+def redirect_stderr(prefix: str = "yapo"):
+    """Replace sys.stderr with a handler that writes each line to the log."""
+    import sys
+    from datetime import datetime
+
+    class _LogStderr:
+        def __init__(self):
+            self.buffer = ''
+        def write(self, data):
+            self.buffer += data
+            while '\n' in self.buffer:
+                line, self.buffer = self.buffer.split('\n', 1)
+                if line.strip():
+                    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    log_write(f"{prefix} {ts}: {line}")
+        def flush(self):
+            if self.buffer.strip():
+                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                log_write(f"{prefix} {ts}: {self.buffer}")
+                self.buffer = ''
+
+    sys.stderr = _LogStderr()

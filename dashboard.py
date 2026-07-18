@@ -16,6 +16,9 @@ from config import load_config
 from jobber import create_job, JOBS_DIR
 from log import log_read
 
+from log import redirect_stderr
+redirect_stderr("dashboard")
+
 # Load Yapo configuration
 config = load_config()
 YAPO_ROOT = config['yapo_root']

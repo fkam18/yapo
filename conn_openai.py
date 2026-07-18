@@ -7,6 +7,8 @@ Returns the full assistant message object.
 import os, json, urllib.request, urllib.error, socket, sys
 from datetime import datetime
 from log import log_write
+from log import redirect_stderr
+redirect_stderr("conn_openai") 
 
 #DEBUG_DUMP = os.environ.get('CONN_OPENAI_DEBUG', 'false').lower() == 'true'
 DEBUG_DUMP = True
