@@ -1,9 +1,9 @@
 # Yapo Configuration (spec13)
-workspace = "/home/master/apps"
-yapo_root = "/home/yapo/yapo_root"          # runtime data (jobs, lock, cache)
+workspace = "/home/fkam/apps"
+yapo_root = "/home/fkam/yapo"          # runtime data (jobs, lock, cache)
 
 [database]
-path = "/home/yapo/yapo_root/memory_db"
+path = "/home/fkam/apps/yapo/memory_db"
 collection = "conversations"
 
 compact_size_kb = 50
@@ -13,7 +13,7 @@ max_job_duration = 300
 
 [[servers]]
 name = "nuc"
-url = "http://{{ nuc_ip }}:11434"
+url = "http://192.168.0.180:11434"
 schedulable = false
 max_jobs = 0
 description = "Intel NUC – MCP tools"
@@ -22,12 +22,12 @@ backend = "openai"
 
 [[servers]]
 name = "gpu"
-url = "http://{{ gpu_ip }}:8080"
+url = "http://192.168.0.158:8080"
 schedulable = true
 max_jobs = 1
 description = "7900 XTX – main LLM"
-mac_address = "{{ gpu_mac }}"
-suspend_command = "ssh -i /app/secrets/gpu/id_rsa -o BatchMode=yes -o StrictHostKeyChecking=no oper@{{ gpu_ip }} sudo systemctl suspend"
+mac_address = "34:97:f6:31:88:ee"
+suspend_command = "ssh -i /app/secrets/gpu/id_rsa -o BatchMode=yes -o StrictHostKeyChecking=no oper@192.168.0.158 sudo systemctl suspend"
 api_key="any"
 backend = "openai"
 
@@ -167,7 +167,7 @@ You are an expert assistant. When asked to write code, output the complete code 
 name = "yapo-mcp"
 transport = "stdio"
 command = "python3"
-args = ["/app/yapo_mcp.py"]
+args = ["/home/fkam/apps/yapo/yapo_mcp.py"]
 protocol = "simple"                # custom format
 description = "Router, memory and summarisation"
 
@@ -175,7 +175,7 @@ description = "Router, memory and summarisation"
 name = "searxng-mcp"
 transport = "stdio"
 command = "python3"
-args = ["/app/web_search_mcp.py"]
+args = ["/home/fkam/apps/yapo/web_search_mcp.py"]
 protocol = "simple"
 env = { SEARXNG_URL = "http://app2.alt:8080" }
 description = "Web search via SearXNG (custom wrapper)"
@@ -237,7 +237,7 @@ mcp_tool = "web_search"
 name = "filesystem-mcp"
 transport = "stdio"
 command = "python3"
-args = ["/app/filesystem_mcp.py"]
+args = ["/home/fkam/apps/yapo/filesystem_mcp.py"]
 protocol = "simple"
 description = "Workspace file operations"
 

@@ -7,8 +7,6 @@ Returns the full assistant message object.
 import os, json, urllib.request, urllib.error, socket, sys
 from datetime import datetime
 from log import log_write
-from log import redirect_stderr
-redirect_stderr("conn_openai") 
 
 #DEBUG_DUMP = os.environ.get('CONN_OPENAI_DEBUG', 'false').lower() == 'true'
 DEBUG_DUMP = True
@@ -76,11 +74,11 @@ def server_reachable(server_config: dict, debug: bool = False) -> bool:
         req = urllib.request.Request(health_url, headers=headers)
         with urllib.request.urlopen(req, timeout=5) as resp:
             if debug:
-                print(f"  /v1/models returned {resp.status}", file=sys.stderr)
+                log_write(f"openai {ts}: /v1/models/returned {resp.status}")
             return resp.status == 200
     except Exception as e:
         if debug:
-            print(f"  /v1/models failed: {e}", file=sys.stderr)
+            log_write(f"openai {ts}: /v1/models failed: {e}")
     host = server_config['url'].split("://")[-1].split(":")[0]
     try:
         port = int(server_config['url'].split(":")[-1])
@@ -89,9 +87,9 @@ def server_reachable(server_config: dict, debug: bool = False) -> bool:
     try:
         with socket.create_connection((host, port), timeout=5):
             if debug:
-                print(f"  TCP connect to {host}:{port} succeeded", file=sys.stderr)
+                log_write(f"openai {ts}: TCP connect to {host}:{port} succeeded")
             return True
     except Exception as e:
         if debug:
-            print(f"  TCP connect failed: {e}", file=sys.stderr)
+            log_write(f"openai {ts}: TCP connect failed: {e}")
     return False

@@ -13,8 +13,23 @@ import sys
 from datetime import datetime
 from log import log_write
 
-from log import redirect_stderr
-redirect_stderr("yapo")
+class LogStderr:
+    def __init__(self):
+        self.buffer = ''
+    def write(self, data):
+        self.buffer += data
+        while '\n' in self.buffer:
+            line, self.buffer = self.buffer.split('\n', 1)
+            if line.strip():
+                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                log_write(f"yapo {ts}: {line}")
+    def flush(self):
+        if self.buffer.strip():
+            ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            log_write(f"yapo {ts}: {self.buffer}")
+            self.buffer = ''
+
+sys.stderr = LogStderr()
 
 def reload_config_signal(signum, frame):
     """Reload config on SIGHUP."""
@@ -158,6 +173,7 @@ def is_within_schedule(schedule):
                 return True
     return False
 
+
 def should_wake_gpu(srv):
     """Decide whether the GPU should be woken based on schedule or on_demand."""
     schedule = srv.get('gpu_schedule', {})
@@ -165,31 +181,41 @@ def should_wake_gpu(srv):
         return True
     return is_within_schedule(schedule)
 
+
 def ensure_gpu_ready(srv, server_name):
+    """Ensure the GPU is reachable.  Sends WoL if needed and waits for boot.
+    Returns True if the GPU is reachable, False if it could not be woken."""
     if server_reachable(srv):
-        gpu_woken_by_yapo[server_name] = False   # already on, we didn't wake it
+        gpu_woken_by_yapo[server_name] = False
         return True
 
     if not should_wake_gpu(srv):
+        print(f"GPU {server_name} not in schedule / on_demand – skipping", file=sys.stderr)
         return False
 
     print(f"Waking GPU {server_name} via WoL...", file=sys.stderr)
     send_wol(srv['mac_address'])
-    gpu_woken_by_yapo[server_name] = True   # we sent WoL
+    gpu_woken_by_yapo[server_name] = True
 
-    for attempt in range(1, 13):
+    # Wait for GPU to boot (up to 120 seconds)
+    for attempt in range(1, 13):   # 12 attempts × 10s = 2 minutes
         time.sleep(10)
         if server_reachable(srv):
             print(f"GPU {server_name} reachable after {attempt * 10}s", file=sys.stderr)
             return True
+        print(f"GPU {server_name} still booting (attempt {attempt}/12)...", file=sys.stderr)
 
+    print(f"GPU {server_name} did not become reachable", file=sys.stderr)
     return False
 
+
 def maybe_suspend_gpu(srv, server_name, now):
-    """Suspend the GPU if Yapo originally woke it and it's been idle long enough."""
+    """Suspend the GPU if it has been idle long enough and Yapo woke it."""
+    # Don't try to suspend if GPU is already unreachable
+    if not server_reachable(srv):
+        return
     schedule = srv.get('gpu_schedule', {})
     idle_timeout = schedule.get('idle_timeout_seconds', 180)
-    on_demand = schedule.get('on_demand', False)
 
     if server_capacity.get(server_name, 0) > 0:
         last_gpu_job_end[server_name] = None
@@ -203,14 +229,9 @@ def maybe_suspend_gpu(srv, server_name, now):
     if idle_seconds < idle_timeout:
         return
 
-    # Only suspend if Yapo originally woke the GPU
-    if not gpu_woken_by_yapo.get(server_name, False):
+    # Only suspend if Yapo originally woke the GPU, or if on_demand is set
+    if not gpu_woken_by_yapo.get(server_name, False) and not schedule.get('on_demand', False):
         return
-
-    # In scheduled mode, only suspend if outside the schedule window
-    if not on_demand:
-        if is_within_schedule(schedule):
-            return
 
     cmd = srv.get('suspend_command')
     if not cmd:
@@ -221,9 +242,10 @@ def maybe_suspend_gpu(srv, server_name, now):
     if result.returncode != 0:
         print(f"Suspend command failed: {result.stderr}", file=sys.stderr)
     else:
-        print("Suspend command succeeded.", file=sys.stderr)
+        print(f"Suspend command succeeded.", file=sys.stderr)
         gpu_woken_by_yapo[server_name] = False
         last_gpu_job_end[server_name] = None
+
 
 def can_launch(job, config):
     """Check if the job can be launched given current capacities and time constraints."""
