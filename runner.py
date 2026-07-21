@@ -411,30 +411,60 @@ def main():
     if not sub_files:
         conv_size = os.path.getsize(conv_path) if os.path.exists(conv_path) else 0
         if conv_size > config.get('compact_size_kb', 50) * 1024:
-            print(f"Job {qno} compacting context...", file=sys.stderr)
-            text_parts = []
-            for msg in conversation:
-                if msg['role'] in ('user', 'assistant') and msg.get('content'):
-                    text_parts.append(msg['content'])
-            context_text = "\n".join(text_parts)
-            summarise_tool = get_tool('summarise_text')
-            mem_write_tool = get_tool('mem_write')
-            mem_read_tool = get_tool('mem_read')
-            if all([summarise_tool, mem_write_tool, mem_read_tool]):
-                summary = call_mcp_tool(summarise_tool, {"text": context_text, "max_points": 10})
-                job_id = job.get('job_id', '')
-                call_mcp_tool(mem_write_tool, {"text": f"{job_id}: {summary}"})
-                memory = call_mcp_tool(mem_read_tool, {"query": job_id})
-                new_qno = subprocess.check_output([sys.executable, 'jobber.py', 'create', '--type', 'main', '--state', 'ready', '--model-type', model_type, '--parent', str(job.get('parent', 0)), '--prompt-file', os.path.join(job_folder, 'prompt.txt')])
-                new_qno = int(new_qno.strip())
-                clone_folder = os.path.join(JOBS_DIR, 'ready', str(new_qno))
-                init_conv = [{"role": "system", "content": model_cfg.get('system_prompt', '')},
-                             {"role": "user", "content": f"[Compacted memory]\n{memory}"}]
-                with open(os.path.join(clone_folder, 'conversation.json'), 'w') as f:
-                    json.dump(init_conv, f)
-                move_job_folder(qno, 'processing', 'done')
-                print(f"Job {qno} compacted to job {new_qno}", file=sys.stderr)
-                sys.exit(0)
+            # Respect per‑model disable flag
+            if model_cfg.get('disable_compaction', False):
+                print(f"Job {qno} compaction disabled for model type '{model_type}'", file=sys.stderr)
+            else:
+                # existing compaction logic (summarise, mem_write, mem_read, clone)
+                print(f"Job {qno} compacting context...", file=sys.stderr)
+                text_parts = []
+                for msg in conversation:
+                    if msg['role'] in ('user', 'assistant', 'tool') and msg.get('content'):
+                        content = msg['content']
+                        if isinstance(content, str):
+                            text_parts.append(content)
+                        elif isinstance(content, list):
+                            # Collect text parts from a multimodal message
+                            for part in content:
+                                if isinstance(part, dict) and part.get('type') == 'text':
+                                    text_parts.append(part['text'])
+                        # ignore other types (e.g. empty)
+                context_text = "\n".join(text_parts)
+                summarise_tool = get_tool('summarise_text')
+                mem_write_tool = get_tool('mem_write')
+                mem_read_tool = get_tool('mem_read')
+                if all([summarise_tool, mem_write_tool, mem_read_tool]):
+                    try:
+                        summary = call_mcp_tool(summarise_tool, {"text": context_text, "max_points": 10})
+                        job_id = job.get('job_id', '')
+                        call_mcp_tool(mem_write_tool, {"text": f"{job_id}: {summary}"})
+                        time.sleep(2)
+                        memory = call_mcp_tool(mem_read_tool, {"query": job_id})
+                        if not memory.strip():
+                            memory = summary
+                        # Build clone name
+                        original_name = job.get('name', '')
+                        clone_name = f"{original_name}-clone" if original_name else "clone"
+
+                        new_qno = subprocess.check_output([
+                            sys.executable, 'jobber.py', 'create',
+                            '--type', 'main',
+                            '--state', 'ready',
+                            '--model-type', model_type,
+                            '--parent', str(job.get('parent', 0)),
+                            '--prompt-file', os.path.join(job_folder, 'prompt.txt'),
+                            '--job-name', clone_name
+                        ])
+                        new_qno = int(new_qno.strip())
+                        clone_folder = os.path.join(JOBS_DIR, 'ready', str(new_qno))
+                        init_conv = [{"role": "user", "content": f"[Compacted memory]\n{memory}"}]
+                        with open(os.path.join(clone_folder, 'conversation.json'), 'w') as f:
+                            json.dump(init_conv, f)
+                        move_job_folder(qno, 'processing', 'done')
+                        print(f"Job {qno} compacted to job {new_qno}", file=sys.stderr)
+                        sys.exit(0)
+                    except Exception as e:
+                        print(f"Job {qno} compaction failed ({e}), continuing without compaction", file=sys.stderr)
 
     # Add current user message to messages array for sending
     messages.append({"role": "user", "content": user_msg_content})
