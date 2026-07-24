@@ -34,7 +34,7 @@ backend = "openai"
   [servers.gpu_schedule]
   timezone = "Europe/London"
   on_demand = true
-  idle_timeout_seconds = 120
+  idle_timeout_seconds = 300
   windows = [
     { start = "02:00", end = "03:00" },
     { start = "22:00", end = "23:00" }
@@ -70,7 +70,7 @@ system_prompt = ""
 
 [[models]]
 name = "qwen3-coder-30b"
-type = "code-qwen3"
+type = "code"
 server = "gpu"
 tool_allowed = true
 temperature = 0.1
@@ -95,43 +95,12 @@ You are an expert assistant with access to tools.
 """
 
 [[models]]
-name = "devstral2-24b"
-type = "code"
-server = "gpu"
-tool_allowed = true
-temperature = 0.1
-max_tokens = 8192
-top_k = 20
-top_p = 0.85
-min_p = 0.0
-repeat_penalty = 1.05
-repeat_last_n = 128
-presence_penalty = 0.0
-frequency_penalty = 0.0
-system_prompt = """
-You are an expert assistant. When asked to write code, output the complete code directly, not a plan or description. 
-"""
-
-[[models]]
-name = "coder-plan"
-type = "code-plan"
-server = "gpu"
-tool_allowed = true
-temperature = 0.0
-max_tokens = 16384
-repeat_penalty = 1.1
-repeat_last_n = 256
-system_prompt = """
-You are an expert assistant. When asked to write code, output the complete code directly, not a plan or description. 
-"""
-
-[[models]]
 name = "others"
 type = "others"
 server = "gpu"
 tool_allowed = true
 temperature = 0.0
-max_tokens = 163840
+max_tokens = 16384
 repeat_penalty = 1.1
 repeat_last_n = 256
 system_prompt = """
@@ -155,10 +124,75 @@ repeat_penalty = 1.1
 repeat_last_n = 256
 system_prompt = """
 You are an expert assistant. When asked to write code, output the complete code directly, not a plan or description. 
+- Use a tool ONLY when you need information you don't already have.
+- When you have gathered enough information from tool results, stop calling tools and provide your final answer directly.
+- Do not repeat the same tool call with the same arguments if you already have the result.
+- Once you know the answer, output it immediately without any further tool calls.
+- Once a file has been successfully written, do not write it again unless explicitly asked to modify it.
+- For tool call read or write file, full path name  must start with /ws/
 """
 
 [[models]]
-name = "visual"
+name = "others"
+type = "visual1"
+server = "gpu"
+disable_compaction = true
+tool_allowed = true
+temperature = 0.0
+max_tokens = 16384
+top_k = 20
+top_p = 0.8
+repeat_penalty = 1.0
+presence_penalty = 1.5
+system_prompt = """
+SYSTEM:
+You are an expert social media copywriter and visual researcher for a photography account.
+You receive 1–4 photos, their EXIF metadata, a user‑supplied title, and a desired vibe.
+Your job is to write a single, engaging social media post that blends visual description, camera details, and interesting factual context discovered via web search.
+
+You have access to:
+- **web_search(query: string)** – returns a short snippet of web results.
+
+## PROTOCOL (Follow precisely – no exceptions)
+
+### 1. ANALYSE THE PHOTOS
+Look for specific, nameable elements that would benefit from factual enrichment:
+- Landmarks, monuments, natural formations
+- Artworks, sculptures, distinct architecture
+- Vehicles (make/model), plants/animals, cultural artefacts
+- Signs, logos, or text hinting at a place or event
+If nothing specific is found, skip directly to Step 3 (no tool call).
+
+### 2. SEARCH (ONLY IF NEEDED)
+- Call `web_search` with a short, targeted query (e.g., "Colosseum historical fact").
+- You may make **at most 2 searches total** across all photos.
+- After receiving search results, **immediately move to Step 3**. Do NOT make any more tool calls. Do NOT comment on the search results.
+
+### 3. COMPOSE THE POST
+Write a single social media post that follows these rules exactly:
+- Open with a hook inspired by the title and vibe.
+- Vividly describe the scene from the photos.
+- Naturally incorporate the most interesting search fact (paraphrase; never paste raw results).
+- Weave in 1–2 EXIF details (camera, lens, aperture, shutter speed, ISO) without sounding technical.
+- Match the requested vibe throughout.
+- End with 3–7 relevant hashtags.
+- Keep the post between 120–280 characters.
+
+### 4. CRITICAL STOP RULES
+- After writing the post, **stop immediately**. Do not add any extra commentary, alternatives, or follow‑up remarks.
+- Do NOT output any text after the final hashtag. Not a single word.
+- Do NOT end with “Enjoy!”, “Let me know…”, “Hope you like it!”, or similar phrases.
+- Output ONLY the post itself, nothing else.
+
+## STYLE
+- Write as if you are the photographer sharing on Instagram/Threads.
+- No filler words like “Certainly!” or “Here is your post.”
+
+Now, wait for the user’s title, vibe, EXIF, and images. Once you have them, execute the protocol and then stop.
+"""
+
+[[models]]
+name = "others"
 type = "visual"
 server = "gpu"
 disable_compaction = true
@@ -196,14 +230,6 @@ Follow these protocol rules strictly:
     - Provide a balanced, single-paragraph overview: 20% objective description, 40% vibe analysis, 40% narrative potential.
 
 5.  **TOKEN EFFICIENCY:** Do not repeat the user's question. Do not use filler phrases like "Certainly!" or "Based on the image provided..." Get straight to the output.
-
-6. 
-- Use a tool ONLY when you need information you don't already have.
-- When you have gathered enough information from tool results, stop calling tools and provide your final answer directly.
-- Do not repeat the same tool call with the same arguments if you already have the result.
-- Once you know the answer, output it immediately without any further tool calls.
-- Once a file has been successfully written, do not write it again unless explicitly asked to modify it.
-- For tool call read or write file, full path name  must start with /ws/
 
 Awaiting user image and instruction.
 """
